@@ -1,0 +1,128 @@
+exp_name: bciiv2a_loso_ctm_v1
+seed: 42
+device: auto          # auto|cpu|cuda
+deterministic: true
+runs_dir: runs
+
+data:
+  subjects: [1,2,3,4,5,6,7,8,9]
+  window:
+    tmin_s: 0.0        # cue-onset aligned
+    tmax_s: 4.0        # 0–4s == 2–6s of each trial
+    drop_last_sample: true
+  resample_sfreq: null
+  standardize:
+    mode: zscore       # zscore|robust
+    eps: 1.0e-6
+
+split:
+  val_strategy: next   # next|fixed|none
+  fixed_val_subject: null
+
+augment:
+  sr:
+    enabled: true
+    k_segments: 8
+    cross_fade: true
+    cross_fade_len: 20
+    avoid_self: true
+  injection:
+    mode: concat       # none|concat|replace
+    replace_p: 0.5
+
+tokenizer:
+  C: 22
+  T: 1000
+  d_kv: 128
+  temporal_kernels: [25, 63]
+  F_per_branch: 8
+  branch_fusion: concat
+  spatial_depth_multiplier: 2
+  spatial_mixer: dw_conv(C,1)
+  token_pool_type: avg
+  token_pool_kernel: 50
+  token_stride: 50
+  conv_norm: BN
+  token_norm: LN
+  act: ELU
+  dropout_p: 0.25
+  pos_emb: learnable   # learnable|sinusoidal|none
+
+ctm:
+  D: 256
+  T_internal: 12
+  M_hist: 16
+  d_input: 128
+  n_heads: 8
+  attn_dropout: 0.0
+  kv_projector: identity   # identity|linear|mlp
+  kv_mlp_hidden: 256
+  synapse_hidden: 512
+  synapse_dropout: 0.1
+  deep_nlms: true
+  memory_hidden_dims: 64
+  do_layernorm_nlm: false
+  nlm_dropout: 0.0
+  init_mode: zeros         # zeros|learnable|learnable_noise
+  ln_on_preact_hist: false
+  fusion: gated            # concat|film|gated
+  no_decay_init: true
+  head_type: linear        # linear|2fc
+  head_hidden: 128
+  num_classes: 4
+
+pairs:
+  D: 256
+  K_action: 256
+  K_out: 256
+  n_self: 16
+  seed: 123
+  cache_name: pairs.pt
+
+loss:
+  tick_loss:
+    type: mean_ce          # mean_ce|ctm_t1t2|hybrid
+    hybrid_lambda: 0.5
+
+readout:
+  mode: certainty_weighted # last|most_certain|mean_logits|certainty_weighted
+  certainty_weighted:
+    alpha: 5.0
+
+opt:
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+
+train:
+  epochs: 100
+  batch_size: 32
+  num_workers: 0
+  grad_clip: 1.0
+  amp: false
+
+early_stop:
+  enabled: true
+  patience: 20
+  metric: kappa           # accuracy|kappa|macro_f1
+
+optional:
+  sampler:
+    type: none                 # none|subject_class_balanced
+    subjects_per_batch: 4      # S
+    samples_per_class: 2       # m
+  supcon:
+    enabled: false
+    tau: 0.07
+    lambda_con: 0.1
+    proj_dim: 128
+    proj_hidden: 256
+    include_same_instance: true
+  adversarial:
+    enabled: false
+    lambda_max: 0.1
+    warmup: 0.3
+    head_hidden: 128
+  rep_agg:
+    mode: certainty_weighted   # last|mean|certainty_weighted
+    certainty_weighted:
+      alpha: 5.0
