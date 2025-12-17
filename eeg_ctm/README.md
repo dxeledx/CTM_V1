@@ -16,6 +16,9 @@ Outputs:
 - `runs/<exp_name>/fold_<test_subject>/metrics.json`
 - `runs/<exp_name>/metrics_summary.json`
 
+Note: to avoid overwriting, if `runs/<exp_name>/` already exists and is non-empty, the runner automatically
+creates `runs/<exp_name>__run01/`, `__run02/`, ... (set `overwrite: true` in config to overwrite in-place).
+
 ## Leakage prevention (LOSO)
 
 The implementation enforces:

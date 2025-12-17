@@ -46,6 +46,7 @@ from eeg_ctm.utils.seed import seed_everything
 def _default_cfg() -> dict[str, Any]:
     return {
         "exp_name": "bciiv2a_loso_ctm_v1",
+        "overwrite": False,
         "seed": 0,
         "device": "auto",  # auto|cpu|cuda
         "deterministic": True,
@@ -103,6 +104,34 @@ def _save_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True))
 
 
+def _resolve_exp_dir(*, runs_dir: str | Path, exp_name: str, overwrite: bool) -> Path:
+    """
+    Avoid overwriting previous results by default.
+
+    If `runs/<exp_name>/` already exists and is non-empty, we create:
+      runs/<exp_name>__run01/
+      runs/<exp_name>__run02/
+      ...
+    """
+    runs_dir = Path(runs_dir)
+    base = runs_dir / exp_name
+    if overwrite or (not base.exists()):
+        return base
+    try:
+        is_empty = not any(base.iterdir())
+    except Exception:
+        is_empty = False
+    if is_empty:
+        return base
+
+    i = 1
+    while True:
+        cand = runs_dir / f"{exp_name}__run{i:02d}"
+        if not cand.exists():
+            return cand
+        i += 1
+
+
 def main() -> None:
     # Silence verbose MOABB warnings (design requirement: ignore, do not print).
     warnings.filterwarnings("ignore", category=UserWarning, message=r"warnEpochs.*")
@@ -118,9 +147,15 @@ def main() -> None:
     cfg_user = load_config_file(args.config)
     deep_update(cfg, cfg_user)
 
-    exp_dir = Path(cfg["runs_dir"]) / str(cfg["exp_name"])
+    exp_dir = _resolve_exp_dir(
+        runs_dir=str(cfg["runs_dir"]),
+        exp_name=str(cfg["exp_name"]),
+        overwrite=bool(cfg.get("overwrite", False)),
+    )
     exp_dir.mkdir(parents=True, exist_ok=True)
+    cfg["output_dir"] = str(exp_dir)
     _save_json(exp_dir / "config_resolved.json", cfg)
+    print(f"[eeg_ctm] Output directory: {exp_dir}")
 
     seed_everything(int(cfg["seed"]), deterministic=bool(cfg["deterministic"]))
     device = _pick_device(str(cfg["device"]))

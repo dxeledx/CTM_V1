@@ -51,10 +51,6 @@ def train_one_epoch(
     grad_clip: Optional[float] = 1.0,
 ) -> tuple[float, dict]:
     model.train()
-    if proj_head is not None:
-        proj_head.train()
-    if subject_head is not None:
-        subject_head.train()
     total_loss = 0.0
     n_steps = 0
 
@@ -239,7 +235,9 @@ def train_one_epoch_with_constraints(
             lam_adv = float(adv_cfg.lambda_max) * linear_warmup(progress, float(adv_cfg.warmup))
             subj_logits = subject_head(grl(rep1, lam_adv))
             loss_adv = torch.nn.functional.cross_entropy(subj_logits, subj_mapped)
-            loss = loss + lam_adv * loss_adv
+            # GRL already scales the reversed gradient by lam_adv; do NOT scale again here
+            # (otherwise the feature extractor receives ~lam_adv^2).
+            loss = loss + loss_adv
             total_loss_adv += float(loss_adv.detach().cpu())
             total_lambda_adv += float(lam_adv)
 
