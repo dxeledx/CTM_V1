@@ -31,12 +31,16 @@ The implementation enforces:
 
 All key hyperparameters are configurable in YAML/JSON:
 
+- Sessions: `data.sessions` (default uses both `session_T` + `session_E`).
 - Epoch window: `data.window.tmin_s/tmax_s` (default `0–4s` aligned to cue-onset, i.e. `2–6s` of each trial).
 - Trial-wise standardization: `data.standardize.mode` (`zscore|robust`).
 - S&R augmentation: `augment.sr.*` and injection mode `augment.injection.mode` (`none|concat|replace`).
 - Tokenizer v1: `tokenizer.*` (targets `N≈20` tokens via `token_pool_kernel/stride`).
 - CTM core: `ctm.*` (ticks, pairs, fusion, NLM, head).
 - Tick loss: `loss.tick_loss.*` and inference readout: `readout.*`.
+- Validation strategy:
+  - `split.val_strategy=within_subject` (recommended): per-training-subject holdout by `split.within_subject_val_fraction` for early stopping.
+  - `split.val_strategy=next|fixed|none` are also supported.
 - Optional constraints:
   - Supervised contrastive: `optional.supcon.*` (requires `optional.sampler.type=subject_class_balanced` in practice).
   - Subject adversarial (GRL): `optional.adversarial.*` (λ warmup).

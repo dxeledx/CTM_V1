@@ -15,7 +15,7 @@ Design doc mapping:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import torch
@@ -105,7 +105,7 @@ def _unique_sorted(values: Iterable[int]) -> list[int]:
 def make_loso_splits(
     subjects: Iterable[int],
     *,
-    val_strategy: str = "next",  # "next" | "none" | "fixed"
+    val_strategy: str = "next",  # "next" | "none" | "fixed" | "within_subject"
     fixed_val_subject: Optional[int] = None,
 ) -> list[dict]:
     """
@@ -121,7 +121,7 @@ def make_loso_splits(
     folds: list[dict] = []
     for fold_idx, test_subject in enumerate(subjects_sorted):
         remaining = [s for s in subjects_sorted if s != test_subject]
-        if val_strategy == "none":
+        if val_strategy in ("none", "within_subject"):
             val_subject = None
             train_subjects = remaining
         elif val_strategy == "fixed":
@@ -158,7 +158,8 @@ def load_bciiv2a_moabb(
     window: BCIIV2aWindow,
     classes: Optional[BCIIV2aClasses] = None,
     resample_sfreq: Optional[float] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return_meta: bool = False,
+) -> Any:
     """
     Load BCI-IV-2a using MOABB.
 
@@ -192,6 +193,8 @@ def load_bciiv2a_moabb(
     if window.drop_last_sample and X.shape[-1] > 0:
         # 4 seconds @ 250Hz yields 1001 samples in MNE (inclusive endpoint); we want 1000.
         X = X[..., : X.shape[-1] - 1]
+    if return_meta:
+        return X, y, subj, meta
     return X, y, subj
 
 

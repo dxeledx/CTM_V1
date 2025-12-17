@@ -6,6 +6,7 @@ runs_dir: runs
 
 data:
   subjects: [1,2,3,4,5,6,7,8,9]
+  sessions: ["session_T", "session_E"]   # use both sessions (2×288 = 576 trials/subject)
   window:
     tmin_s: 0.0        # cue-onset aligned
     tmax_s: 4.0        # 0–4s == 2–6s of each trial
@@ -16,8 +17,10 @@ data:
     eps: 1.0e-6
 
 split:
-  val_strategy: next   # next|fixed|none
+  val_strategy: within_subject   # within_subject|next|fixed|none
   fixed_val_subject: null
+  within_subject_val_fraction: 0.3
+  within_subject_stratify_by_class: true
 
 augment:
   sr:

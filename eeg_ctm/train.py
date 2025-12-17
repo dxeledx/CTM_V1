@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 from eeg_ctm.augment.sr import ClasswiseMemoryBank, SRAugmentConfig, SegmentationRecombinationAugmenter
 from eeg_ctm.data.bciiv2a import BCIIV2aClasses, BCIIV2aWindow, EEGTrialsDataset, make_loso_splits, subset_by_subjects
 from eeg_ctm.data.samplers import SamplerConfig, SubjectClassBalancedBatchSampler
+from eeg_ctm.data.splits import WithinSubjectValSplitConfig, split_within_subjects
 from eeg_ctm.eval import EvalConfig, evaluate
 from eeg_ctm.models.aggregation import CertaintyWeightedConfig
 from eeg_ctm.models.adversarial import AdvConfig, SubjectHead
@@ -53,11 +54,19 @@ def _default_cfg() -> dict[str, Any]:
         "runs_dir": "runs",
         "data": {
             "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "sessions": ["session_T", "session_E"],
             "window": asdict(BCIIV2aWindow()),
             "resample_sfreq": None,
             "standardize": {"mode": "zscore", "eps": 1e-6},
         },
-        "split": {"val_strategy": "next", "fixed_val_subject": None},
+        "split": {
+            # "next"|"fixed"|"none"|"within_subject"
+            "val_strategy": "within_subject",
+            "fixed_val_subject": None,
+            # within_subject settings (CTNet-style, non-transductive)
+            "within_subject_val_fraction": 0.3,
+            "within_subject_stratify_by_class": True,
+        },
         "augment": {
             "sr": asdict(SRAugmentConfig()),
             "injection": asdict(InjectionConfig()),
@@ -102,6 +111,35 @@ def _standardize_trials_np(X: np.ndarray, *, mode: str, eps: float) -> np.ndarra
 def _save_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def _meta_breakdown_table(meta_df) -> str:
+    """
+    Format subject×session×run counts for logging.
+    """
+    # meta_df is a pandas DataFrame from MOABB.
+    g = meta_df.groupby(["subject", "session", "run"]).size().reset_index(name="n")
+    pivot = g.pivot_table(index=["subject", "session"], columns="run", values="n", fill_value=0, aggfunc="sum")
+    # Stable column order: run_0..run_5 if present.
+    cols = sorted(pivot.columns.tolist())
+    pivot = pivot.reindex(cols, axis=1)
+    pivot["total"] = pivot.sum(axis=1)
+    return pivot.to_string()
+
+
+def _log_split_counts(logger, name: str, dataset: EEGTrialsDataset | None, meta_all) -> dict[str, Any]:
+    if dataset is None:
+        logger.info(f"{name}: None")
+        return {f"{name}_n": 0}
+
+    n = len(dataset)
+    uid = dataset.uid.detach().cpu().numpy().astype(int)
+    meta_sub = meta_all.iloc[uid]
+    subj_list = sorted({int(s) for s in meta_sub["subject"].unique().tolist()})
+    sess_list = sorted({str(s) for s in meta_sub["session"].unique().tolist()})
+    logger.info(f"{name}: n={n} subjects={subj_list} sessions={sess_list}")
+    logger.info(f"{name} breakdown (subject×session×run):\n{_meta_breakdown_table(meta_sub)}")
+    return {f"{name}_n": n, f"{name}_subjects": subj_list, f"{name}_sessions": sess_list}
 
 
 def _resolve_exp_dir(*, runs_dir: str | Path, exp_name: str, overwrite: bool) -> Path:
@@ -166,19 +204,31 @@ def main() -> None:
     pair_bank = load_or_create_pairbank(pairs_cfg, cache_path=pair_cache)
 
     subjects = cfg["data"]["subjects"]
-    folds = make_loso_splits(subjects, val_strategy=cfg["split"]["val_strategy"], fixed_val_subject=cfg["split"]["fixed_val_subject"])
+    val_strategy = str(cfg["split"]["val_strategy"])
+    folds = make_loso_splits(subjects, val_strategy=val_strategy, fixed_val_subject=cfg["split"]["fixed_val_subject"])
 
     # Load full dataset once (MOABB uses local caches; no forced downloads).
     classes = BCIIV2aClasses()
     window = BCIIV2aWindow(**cfg["data"]["window"])
     from eeg_ctm.data.bciiv2a import load_bciiv2a_moabb
 
-    X_all, y_all, subj_all = load_bciiv2a_moabb(
+    X_all, y_all, subj_all, meta_all = load_bciiv2a_moabb(
         subjects,
         window=window,
         classes=classes,
         resample_sfreq=cfg["data"]["resample_sfreq"],
+        return_meta=True,
     )
+    # Optional session filtering (default: use both sessions).
+    sessions_keep = cfg["data"].get("sessions")
+    if sessions_keep is not None:
+        sessions_keep_set = {str(s) for s in sessions_keep}
+        mask = meta_all["session"].isin(list(sessions_keep_set)).to_numpy()
+        meta_all = meta_all.iloc[mask].reset_index(drop=True)
+        X_all = X_all[mask]
+        y_all = y_all[mask]
+        subj_all = subj_all[mask]
+
     std_cfg = cfg["data"]["standardize"]
     X_all = _standardize_trials_np(X_all, mode=std_cfg["mode"], eps=float(std_cfg.get("eps", 1e-6))).astype(np.float32)
 
@@ -189,19 +239,36 @@ def main() -> None:
         fold_dir = exp_dir / fold_name
         logger = setup_logger(fold_dir, name=f"eeg_ctm.{fold_name}")
         logger.info(f"Device: {device}")
-        logger.info(f"Fold: test={fold['test_subject']} val={fold['val_subject']} train={fold['train_subjects']}")
+        logger.info(
+            f"Fold: test={fold['test_subject']} val={fold['val_subject']} train={fold['train_subjects']} (val_strategy={val_strategy})"
+        )
 
-        x_tr, y_tr, s_tr, uid_tr = subset_by_subjects(X_all, y_all, subj_all, fold["train_subjects"])
-        train_ds = EEGTrialsDataset(x_tr, y_tr, s_tr, uid=uid_tr)
-
-        if fold["val_subject"] is None:
-            val_ds = None
+        x_tr_all, y_tr_all, s_tr_all, uid_tr_all = subset_by_subjects(X_all, y_all, subj_all, fold["train_subjects"])
+        if val_strategy == "within_subject":
+            vs_cfg = WithinSubjectValSplitConfig(
+                val_fraction=float(cfg["split"].get("within_subject_val_fraction", 0.3)),
+                seed=int(cfg["seed"]) + 1000 * int(fold["test_subject"]),
+                stratify_by_class=bool(cfg["split"].get("within_subject_stratify_by_class", True)),
+            )
+            tr_idx, va_idx = split_within_subjects(y_tr_all, s_tr_all, cfg=vs_cfg)
+            train_ds = EEGTrialsDataset(x_tr_all[tr_idx], y_tr_all[tr_idx], s_tr_all[tr_idx], uid=uid_tr_all[tr_idx])
+            val_ds = EEGTrialsDataset(x_tr_all[va_idx], y_tr_all[va_idx], s_tr_all[va_idx], uid=uid_tr_all[va_idx])
         else:
-            x_va, y_va, s_va, uid_va = subset_by_subjects(X_all, y_all, subj_all, [fold["val_subject"]])
-            val_ds = EEGTrialsDataset(x_va, y_va, s_va, uid=uid_va)
+            train_ds = EEGTrialsDataset(x_tr_all, y_tr_all, s_tr_all, uid=uid_tr_all)
+            if fold["val_subject"] is None:
+                val_ds = None
+            else:
+                x_va, y_va, s_va, uid_va = subset_by_subjects(X_all, y_all, subj_all, [fold["val_subject"]])
+                val_ds = EEGTrialsDataset(x_va, y_va, s_va, uid=uid_va)
 
         x_te, y_te, s_te, uid_te = subset_by_subjects(X_all, y_all, subj_all, [fold["test_subject"]])
         test_ds = EEGTrialsDataset(x_te, y_te, s_te, uid=uid_te)
+
+        # Sanity logging: exact sample counts and subject×session×run breakdown.
+        split_info = {}
+        split_info.update(_log_split_counts(logger, "train", train_ds, meta_all))
+        split_info.update(_log_split_counts(logger, "val", val_ds, meta_all))
+        split_info.update(_log_split_counts(logger, "test", test_ds, meta_all))
 
         train_cfg = TrainConfig(**cfg["train"])
         sampler_cfg = SamplerConfig(**cfg["optional"]["sampler"])
@@ -240,6 +307,10 @@ def main() -> None:
         injection_cfg = InjectionConfig(**cfg["augment"]["injection"])
         supcon_cfg = SupConConfig(**cfg["optional"]["supcon"])
         adv_cfg = AdvConfig(**cfg["optional"]["adversarial"])
+        logger.info(
+            f"Augment: sr_enabled={sr_cfg.enabled} injection_mode={injection_cfg.mode} | "
+            f"Optional: supcon_enabled={supcon_cfg.enabled} adversarial_enabled={adv_cfg.enabled} sampler={sampler_cfg.type}"
+        )
 
         need_aug = sr_cfg.enabled and (injection_cfg.mode != "none" or supcon_cfg.enabled)
         if need_aug:
@@ -378,6 +449,9 @@ def main() -> None:
             "train_subjects": fold["train_subjects"],
             "val_subject": fold["val_subject"],
             "test_subject": fold["test_subject"],
+            "val_strategy": val_strategy,
+            "data_sessions": sessions_keep if sessions_keep is not None else "all",
+            "split_counts": split_info,
             "best_epoch": best_epoch,
             "best_val": best_val,
             "test": test_metrics.to_dict(),
