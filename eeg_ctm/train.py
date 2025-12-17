@@ -313,7 +313,14 @@ def main() -> None:
                 torch.save({"model": model.state_dict(), "epoch": epoch}, fold_dir / "last.pt")
 
             history.append(entry)
-            logger.info(" | ".join([f\"{k}={v:.4f}\" if isinstance(v, float) else f\"{k}={v}\" for k, v in entry.items()]))
+            logger.info(
+                " | ".join(
+                    [
+                        f"{k}={float(v):.4f}" if isinstance(v, (float, np.floating)) else f"{k}={v}"
+                        for k, v in entry.items()
+                    ]
+                )
+            )
 
         # Load best checkpoint (val-based) if available; else keep current.
         ckpt_path = fold_dir / "best.pt" if (fold_dir / "best.pt").exists() else (fold_dir / "last.pt")
