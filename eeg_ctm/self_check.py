@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 
@@ -45,6 +46,11 @@ def _standardize_trials_np(X: np.ndarray, *, mode: str, eps: float) -> np.ndarra
 
 
 def main() -> None:
+    warnings.filterwarnings("ignore", category=UserWarning, message=r"warnEpochs.*")
+    warnings.filterwarnings("ignore", category=FutureWarning, message=r"The current default of copy=False.*")
+    warnings.filterwarnings("ignore", category=UserWarning, module=r"moabb\..*")
+    warnings.filterwarnings("ignore", category=FutureWarning, module=r"moabb\..*")
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default="configs/bciiv2a_loso.yaml")
     ap.add_argument("--subjects", type=str, default="1,2")

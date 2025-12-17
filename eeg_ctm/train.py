@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,12 @@ def _save_json(path: Path, obj: Any) -> None:
 
 
 def main() -> None:
+    # Silence verbose MOABB warnings (design requirement: ignore, do not print).
+    warnings.filterwarnings("ignore", category=UserWarning, message=r"warnEpochs.*")
+    warnings.filterwarnings("ignore", category=FutureWarning, message=r"The current default of copy=False.*")
+    warnings.filterwarnings("ignore", category=UserWarning, module=r"moabb\..*")
+    warnings.filterwarnings("ignore", category=FutureWarning, module=r"moabb\..*")
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, type=str)
     args = ap.parse_args()
