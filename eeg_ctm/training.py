@@ -137,6 +137,7 @@ def train_one_epoch_with_constraints(
     total_loss_supcon = 0.0
     total_loss_adv = 0.0
     total_lambda_adv = 0.0
+    cls_details_sum: dict[str, float] = {}
     n_steps = 0
 
     if supcon_cfg.enabled:
@@ -182,7 +183,7 @@ def train_one_epoch_with_constraints(
         # ---- classification loss ----
         if need_view2 and injection.mode == "concat":
             assert y_cat is not None
-            loss_cls, _ = tick_classification_loss(logits_cat, cert_cat, y_cat, cfg=tick_loss_cfg)
+            loss_cls, cls_details = tick_classification_loss(logits_cat, cert_cat, y_cat, cfg=tick_loss_cfg)
         elif need_view2 and injection.mode == "replace":
             p = float(injection.replace_p)
             if not (0.0 <= p <= 1.0):
@@ -193,11 +194,13 @@ def train_one_epoch_with_constraints(
             assert logits2 is not None and cert2 is not None
             logits_mix[mask] = logits2[mask]
             cert_mix[mask] = cert2[mask]
-            loss_cls, _ = tick_classification_loss(logits_mix, cert_mix, y, cfg=tick_loss_cfg)
+            loss_cls, cls_details = tick_classification_loss(logits_mix, cert_mix, y, cfg=tick_loss_cfg)
         else:
-            loss_cls, _ = tick_classification_loss(logits1, cert1, y, cfg=tick_loss_cfg)
+            loss_cls, cls_details = tick_classification_loss(logits1, cert1, y, cfg=tick_loss_cfg)
 
         loss = loss_cls
+        for k, v in cls_details.items():
+            cls_details_sum[k] = cls_details_sum.get(k, 0.0) + float(v)
 
         # ---- aggregate representations ----
         rep1 = None
@@ -257,6 +260,8 @@ def train_one_epoch_with_constraints(
         "train_loss": avg_loss,
         "train_loss_cls": total_loss_cls / max(1, n_steps),
     }
+    for k, s in cls_details_sum.items():
+        details[f"train_{k}"] = float(s) / max(1, n_steps)
     if supcon_cfg.enabled:
         details["train_loss_supcon"] = total_loss_supcon / max(1, n_steps)
     if adv_cfg.enabled:
