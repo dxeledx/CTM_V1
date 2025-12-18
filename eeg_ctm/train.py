@@ -405,7 +405,11 @@ def main() -> None:
         injection_cfg = InjectionConfig(**cfg["augment"]["injection"])
         supcon_cfg = SupConConfig(**cfg["optional"]["supcon"])
         adv_cfg = AdvConfig(**cfg["optional"]["adversarial"])
-        wdro_cfg = WDROConfig(**cfg.get("wdro", {}))
+        wdro_dict = dict(cfg.get("wdro", {}))
+        # Backward compat: `mix_clean` was renamed to `mix_robust` (robust weight).
+        if "mix_clean" in wdro_dict and "mix_robust" not in wdro_dict:
+            wdro_dict["mix_robust"] = wdro_dict.pop("mix_clean")
+        wdro_cfg = WDROConfig(**wdro_dict)
         logger.info(
             f"Augment: sr_enabled={sr_cfg.enabled} injection_mode={injection_cfg.mode} | "
             f"Optional: supcon_enabled={supcon_cfg.enabled} adversarial_enabled={adv_cfg.enabled} "

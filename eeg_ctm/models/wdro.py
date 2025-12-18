@@ -35,8 +35,10 @@ class WDROConfig:
     steps: int = 3
     step_size: float = 0.2
 
-    # Total robust objective = (1-mix_clean)*clean + mix_clean*robust
-    mix_clean: float = 0.5
+    # Total robust objective = (1-mix_robust)*clean + mix_robust*robust.
+    # NOTE: If you already optimize a (clean) classification loss elsewhere, you usually want
+    # mix_robust=1.0 here to avoid double-counting the clean CE.
+    mix_robust: float = 1.0
     lambda_wdro: float = 1.0  # scale factor applied to the WDRO objective
 
     normalize_rep: bool = True  # layer-norm rep before perturbation
@@ -53,8 +55,8 @@ def warmup_scale(epoch: int, warmup_epochs: int) -> float:
     warmup_epochs = int(warmup_epochs)
     if warmup_epochs <= 0:
         return 1.0
-    # epoch=1 -> 1/warmup, epoch=warmup -> 1
-    return float(min(1.0, max(0.0, epoch / warmup_epochs)))
+    # epoch=1 -> 0, epoch=warmup_epochs+1 -> 1
+    return float(min(1.0, max(0.0, (epoch - 1) / warmup_epochs)))
 
 
 def _project_l2(delta: torch.Tensor, rho: float) -> torch.Tensor:
@@ -142,9 +144,9 @@ def wdro_rep_objective(
     logits_robust = head(rep_base + delta_star)
     loss_robust = F.cross_entropy(logits_robust, y)
 
-    w_robust = float(cfg.mix_clean)
+    w_robust = float(cfg.mix_robust)
     if not (0.0 <= w_robust <= 1.0):
-        raise ValueError("wdro.mix_clean must be in [0,1]")
+        raise ValueError("wdro.mix_robust must be in [0,1]")
     loss = (1.0 - w_robust) * loss_clean + w_robust * loss_robust
 
     with torch.no_grad():
@@ -163,4 +165,3 @@ def wdro_rep_objective(
         "wdro_warmup_scale": float(scale),
     }
     return loss, details
-

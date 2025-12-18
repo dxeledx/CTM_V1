@@ -59,7 +59,7 @@ All key hyperparameters are configurable in YAML/JSON:
 - CTM core: `ctm.*` (ticks, pairs, fusion, NLM, head).
 - Tick loss: `loss.tick_loss.*` and inference readout: `readout.*`.
 - Readout stop-grad: `readout.certainty_weighted.detach_certainty` (helps prevent “certainty shortcut” when certainty weights appear in training objectives).
-- Wasserstein-DRO (feature-space PGD): `wdro.*` (disabled by default; robustifies pre-head representations under L2-ball perturbations).
+- Wasserstein-DRO (feature-space PGD): `wdro.*` (disabled by default; robustifies pre-head representations under L2-ball perturbations; set `wdro.mix_robust=1.0` to avoid adding extra clean CE on top of the main tick-loss).
 - Validation strategy:
   - `split.val_strategy=within_subject` (recommended): per-training-subject holdout by `split.within_subject_val_fraction` for early stopping.
   - `split.val_strategy=next|fixed|none` are also supported.
