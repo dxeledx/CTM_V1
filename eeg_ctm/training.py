@@ -116,6 +116,7 @@ def train_one_epoch_with_constraints(
     # ---- representation aggregation ----
     rep_mode: str,
     rep_cw_alpha: float,
+    rep_cw_detach: bool,
     # ---- supervised contrastive ----
     supcon_cfg: SupConConfig,
     proj_head: Optional[ProjectionHead],
@@ -148,7 +149,7 @@ def train_one_epoch_with_constraints(
         if subject_head is None or subject_id_map is None:
             raise ValueError("subject_head and subject_id_map are required when adversarial is enabled")
 
-    rep_cw = CertaintyWeightedConfig(alpha=float(rep_cw_alpha))
+    rep_cw = CertaintyWeightedConfig(alpha=float(rep_cw_alpha), detach_certainty=bool(rep_cw_detach))
 
     for batch in loader:
         global_step += 1

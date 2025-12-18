@@ -21,6 +21,7 @@ RepAggType = Literal["last", "mean", "certainty_weighted"]
 @dataclass(frozen=True)
 class CertaintyWeightedConfig:
     alpha: float = 5.0  # softmax temperature on certainty
+    detach_certainty: bool = False  # stop-grad through certainty weights
 
 
 def aggregate_logits(
@@ -47,7 +48,8 @@ def aggregate_logits(
         out = logits_ticks.permute(0, 2, 1)  # [B,T,C]
         return out[torch.arange(B, device=logits_ticks.device), idx, :]
     if mode == "certainty_weighted":
-        w = torch.softmax(float(cw.alpha) * certainty, dim=-1)  # [B,T]
+        cert = certainty.detach() if bool(cw.detach_certainty) else certainty
+        w = torch.softmax(float(cw.alpha) * cert, dim=-1)  # [B,T]
         return torch.einsum("bct,bt->bc", logits_ticks, w)
     raise ValueError(mode)
 
@@ -72,7 +74,7 @@ def aggregate_rep(
     if mode == "mean":
         return z_ticks.mean(dim=1)
     if mode == "certainty_weighted":
-        w = torch.softmax(float(cw.alpha) * certainty, dim=-1)  # [B,T]
+        cert = certainty.detach() if bool(cw.detach_certainty) else certainty
+        w = torch.softmax(float(cw.alpha) * cert, dim=-1)  # [B,T]
         return torch.einsum("btd,bt->bd", z_ticks, w)
     raise ValueError(mode)
-

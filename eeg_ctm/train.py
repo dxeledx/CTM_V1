@@ -26,6 +26,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from eeg_ctm.augment.sr import ClasswiseMemoryBank, SRAugmentConfig, SegmentationRecombinationAugmenter
+from eeg_ctm.adapt.fewshot import FewShotConfig, run_few_shot
 from eeg_ctm.data.bciiv2a import BCIIV2aClasses, BCIIV2aWindow, EEGTrialsDataset, make_loso_splits, subset_by_subjects
 from eeg_ctm.data.samplers import SamplerConfig, SubjectClassBalancedBatchSampler
 from eeg_ctm.data.splits import WithinSubjectValSplitConfig, split_within_subjects
@@ -87,6 +88,8 @@ def _default_cfg() -> dict[str, Any]:
             "adversarial": asdict(AdvConfig()),
             "rep_agg": {"mode": "certainty_weighted", "certainty_weighted": asdict(CertaintyWeightedConfig())},
         },
+        # Optional test-time few-shot adaptation on the held-out subject.
+        "few_shot": asdict(FewShotConfig()),
     }
 
 
@@ -428,6 +431,7 @@ def main() -> None:
         rep_agg_cfg = cfg["optional"]["rep_agg"]
         rep_mode = str(rep_agg_cfg.get("mode", "certainty_weighted"))
         rep_cw_alpha = float(rep_agg_cfg.get("certainty_weighted", {}).get("alpha", 5.0))
+        rep_cw_detach = bool(rep_agg_cfg.get("certainty_weighted", {}).get("detach_certainty", False))
 
         proj_head = None
         if supcon_cfg.enabled:
@@ -452,6 +456,7 @@ def main() -> None:
         eval_cfg = EvalConfig(
             readout=str(cfg["readout"]["mode"]),
             certainty_weighted_alpha=float(cfg["readout"]["certainty_weighted"]["alpha"]),
+            certainty_weighted_detach_certainty=bool(cfg["readout"]["certainty_weighted"].get("detach_certainty", False)),
         )
 
         best_metric = -1e9
@@ -486,6 +491,7 @@ def main() -> None:
                 grad_clip=float(train_cfg.grad_clip) if train_cfg.grad_clip is not None else None,
                 rep_mode=rep_mode,
                 rep_cw_alpha=rep_cw_alpha,
+                rep_cw_detach=rep_cw_detach,
                 supcon_cfg=supcon_cfg,
                 proj_head=proj_head,
                 adv_cfg=adv_cfg,
@@ -537,6 +543,32 @@ def main() -> None:
         test_metrics = evaluate(model, test_loader, device=device, eval_cfg=eval_cfg)
         logger.info(f"Test metrics: {test_metrics.to_dict()}")
 
+        few_shot_cfg = FewShotConfig(**cfg.get("few_shot", {}))
+        few_shot_out: dict[str, Any] = {"enabled": False}
+        if few_shot_cfg.enabled:
+            # Few-shot adaptation happens strictly after model selection (no leakage into training).
+            meta_test = meta_all.iloc[uid_te].reset_index(drop=True)
+            few_shot_out = run_few_shot(
+                model,
+                test_ds=test_ds,
+                meta_sub=meta_test,
+                device=device,
+                num_classes=int(cfg["ctm"]["num_classes"]),
+                tick_loss_cfg=tick_loss_cfg,
+                eval_cfg=eval_cfg,
+                cfg=few_shot_cfg,
+                fold_seed=int(cfg["seed"]) + 1000 * int(fold["test_subject"]),
+            )
+            for k_str, res in few_shot_out.get("results", {}).items():
+                m = res["mean"]
+                s = res["std"]
+                logger.info(
+                    f"Few-shot K={k_str} (mean±std over {res['n_resamples']} resamples): "
+                    f"acc={m['accuracy']:.4f}±{s['accuracy']:.4f} "
+                    f"kappa={m['kappa']:.4f}±{s['kappa']:.4f} "
+                    f"macro_f1={m['macro_f1']:.4f}±{s['macro_f1']:.4f}"
+                )
+
         fold_metrics = {
             "fold": fold_name,
             "train_subjects": fold["train_subjects"],
@@ -548,6 +580,7 @@ def main() -> None:
             "best_epoch": best_epoch,
             "best_val": best_val,
             "test": test_metrics.to_dict(),
+            "few_shot": few_shot_out,
         }
         _save_json(fold_dir / "metrics.json", fold_metrics)
         _save_json(fold_dir / "history.json", history)
@@ -562,7 +595,32 @@ def main() -> None:
         vals = np.array([t[k] for t in tests], dtype=np.float64)
         summary[k] = {"mean": float(vals.mean()), "std": float(vals.std(ddof=1))}
 
-    out = {"exp_name": cfg["exp_name"], "n_folds": len(fold_results), "test_summary": summary, "folds": fold_results}
+    # Optional: few-shot summary (mean±std over folds, using each fold's mean over resamples).
+    few_shot_summary = {}
+    few_shot_folds = [fr.get("few_shot", {}) for fr in fold_results if bool(fr.get("few_shot", {}).get("enabled", False))]
+    if len(few_shot_folds) > 0:
+        # Collect all K values present in every fold.
+        k_sets = [set(fs.get("results", {}).keys()) for fs in few_shot_folds]
+        common_ks = sorted(set.intersection(*k_sets)) if k_sets else []
+        for k_str in common_ks:
+            per_fold = [fs["results"][k_str]["mean"] for fs in few_shot_folds if k_str in fs.get("results", {})]
+            if len(per_fold) == 0:
+                continue
+            few_shot_summary[k_str] = {}
+            for metric in keys:
+                vals = np.array([float(d[metric]) for d in per_fold], dtype=np.float64)
+                few_shot_summary[k_str][metric] = {
+                    "mean": float(vals.mean()),
+                    "std": float(vals.std(ddof=1 if vals.size >= 2 else 0)),
+                }
+
+    out = {
+        "exp_name": cfg["exp_name"],
+        "n_folds": len(fold_results),
+        "test_summary": summary,
+        "few_shot_summary": few_shot_summary,
+        "folds": fold_results,
+    }
     _save_json(exp_dir / "metrics_summary.json", out)
 
 

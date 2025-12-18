@@ -152,6 +152,7 @@ def main() -> None:
         grad_clip=float(cfg["train"].get("grad_clip", 1.0)),
         rep_mode="certainty_weighted",
         rep_cw_alpha=5.0,
+        rep_cw_detach=False,
         supcon_cfg=SupConConfig(enabled=False),
         proj_head=None,
         adv_cfg=AdvConfig(enabled=False),

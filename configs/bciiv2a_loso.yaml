@@ -93,6 +93,7 @@ readout:
   mode: certainty_weighted # last|most_certain|mean_logits|certainty_weighted
   certainty_weighted:
     alpha: 5.0
+    detach_certainty: false   # stop-grad through certainty weights (relevant when used in training objectives)
 
 opt:
   lr: 3.0e-4
@@ -131,3 +132,22 @@ optional:
     mode: certainty_weighted   # last|mean|certainty_weighted
     certainty_weighted:
       alpha: 5.0
+      detach_certainty: false
+
+few_shot:
+  enabled: false
+  # Recommended protocol for BCI-IV-2a: adapt on session "0train" and report on "1test".
+  # This avoids using the evaluation session for adaptation.
+  protocol: cross_session        # within_subject|cross_session
+  support_session: "0train"
+  query_session: "1test"
+  k_shots: [1, 5, 10, 20]
+  n_resamples: 5                 # repeated balanced re-sampling for mean±std
+  seed: 42
+  # Head-only adaptation (default): freeze tokenizer + CTM core, train only the head parameters.
+  trainable_prefixes: ["ctm.head"]
+  lr: 1.0e-2
+  weight_decay: 0.0
+  steps: 200
+  batch_size: 16
+  grad_clip: null
