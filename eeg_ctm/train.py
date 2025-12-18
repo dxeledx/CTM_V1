@@ -54,7 +54,9 @@ def _default_cfg() -> dict[str, Any]:
         "runs_dir": "runs",
         "data": {
             "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9],
-            "sessions": ["session_T", "session_E"],
+            # Use all sessions by default. MOABB session naming differs across versions
+            # (e.g. "0train"/"1test" or "session_T"/"session_E").
+            "sessions": None,
             "window": asdict(BCIIV2aWindow()),
             "resample_sfreq": None,
             "standardize": {"mode": "zscore", "eps": 1e-6},
@@ -142,6 +144,91 @@ def _log_split_counts(logger, name: str, dataset: EEGTrialsDataset | None, meta_
     return {f"{name}_n": n, f"{name}_subjects": subj_list, f"{name}_sessions": sess_list}
 
 
+def _is_train_session_name(name: str) -> bool:
+    n = str(name).strip().lower()
+    if n in {"0", "train", "training", "t", "session_t", "0train"}:
+        return True
+    if "train" in n:
+        return True
+    # Be careful: "test" ends with "t", so exclude it.
+    return n.endswith("t") and ("test" not in n) and ("eval" not in n)
+
+
+def _is_test_session_name(name: str) -> bool:
+    n = str(name).strip().lower()
+    if n in {"1", "test", "testing", "eval", "evaluation", "e", "session_e", "1test"}:
+        return True
+    return ("test" in n) or ("eval" in n) or n.endswith("e")
+
+
+def _resolve_sessions_to_keep(*, available: list[str], requested: Any) -> list[str]:
+    """
+    Resolve config `data.sessions` into concrete session names present in MOABB `meta['session']`.
+
+    Supports common aliases across MOABB versions:
+      - train: "session_T"/"T"/"train"/"0train"/"0"
+      - test:  "session_E"/"E"/"test"/"1test"/"1"
+      - all:   null (handled upstream) or "all"/"both" to keep everything
+    """
+    if requested is None:
+        return list(available)
+    if isinstance(requested, (str, int)):
+        req_list = [requested]
+    else:
+        req_list = list(requested)
+
+    available_list = [str(s) for s in available]
+    available_set = set(available_list)
+
+    req_str = [str(s) for s in req_list]
+    req_norm = [s.strip().lower() for s in req_str]
+    req_set = set(req_str)
+
+    if any(s in {"all", "both", "*"} for s in req_norm):
+        return list(available_list)
+
+    if req_set.issubset(available_set):
+        # Preserve the order in `available_list` for stability.
+        return [s for s in available_list if s in req_set]
+
+    want_train = any(_is_train_session_name(s) for s in req_norm)
+    want_test = any(_is_test_session_name(s) for s in req_norm)
+    if not (want_train or want_test):
+        raise ValueError(
+            f"data.sessions={req_str} does not match available sessions={sorted(available_set)}. "
+            "Set data.sessions: null to use all sessions."
+        )
+
+    # If the user specified something we don't understand (neither alias nor exact), fail loudly.
+    for raw, norm in zip(req_str, req_norm):
+        if raw in available_set:
+            continue
+        if norm in {"all", "both", "*"}:
+            continue
+        if _is_train_session_name(norm) or _is_test_session_name(norm):
+            continue
+        raise ValueError(
+            f"data.sessions contains unknown value {raw!r}. "
+            f"Available sessions={sorted(available_set)}. Use data.sessions: null to keep all."
+        )
+
+    selected: list[str] = []
+    for s in available_list:
+        if want_train and _is_train_session_name(s):
+            selected.append(s)
+        if want_test and _is_test_session_name(s):
+            selected.append(s)
+
+    # De-duplicate while preserving order.
+    selected = list(dict.fromkeys(selected))
+    if len(selected) == 0:
+        raise ValueError(
+            f"data.sessions={req_str} resolved to empty on available sessions={sorted(available_set)}. "
+            "Set data.sessions: null to use all sessions."
+        )
+    return selected
+
+
 def _resolve_exp_dir(*, runs_dir: str | Path, exp_name: str, overwrite: bool) -> Path:
     """
     Avoid overwriting previous results by default.
@@ -222,8 +309,14 @@ def main() -> None:
     # Optional session filtering (default: use both sessions).
     sessions_keep = cfg["data"].get("sessions")
     if sessions_keep is not None:
-        sessions_keep_set = {str(s) for s in sessions_keep}
-        mask = meta_all["session"].isin(list(sessions_keep_set)).to_numpy()
+        available_sessions = sorted({str(s) for s in meta_all["session"].unique().tolist()})
+        resolved_sessions = _resolve_sessions_to_keep(available=available_sessions, requested=sessions_keep)
+        mask = meta_all["session"].isin(resolved_sessions).to_numpy()
+        if mask.sum() == 0:
+            raise ValueError(
+                f"Session filter produced 0 trials. requested={sessions_keep!r} "
+                f"resolved={resolved_sessions!r} available={available_sessions!r}"
+            )
         meta_all = meta_all.iloc[mask].reset_index(drop=True)
         X_all = X_all[mask]
         y_all = y_all[mask]

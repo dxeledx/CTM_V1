@@ -35,6 +35,8 @@ def split_within_subjects(
     subjects = np.asarray(subjects, dtype=np.int64)
     if y.shape[0] != subjects.shape[0]:
         raise ValueError("y/subjects length mismatch")
+    if y.size == 0:
+        raise ValueError("split_within_subjects: empty input (no trials to split)")
 
     val_fraction = float(cfg.val_fraction)
     if not (0.0 < val_fraction < 1.0):
@@ -58,8 +60,13 @@ def split_within_subjects(
             if classes.size < 2:
                 perm = rng.permutation(idx)
                 n_val = max(1, int(round(idx.size * val_fraction)))
-                val_parts.append(perm[:n_val])
-                train_parts.append(perm[n_val:])
+                n_val = min(n_val, max(0, idx.size - 1))  # keep at least 1 train sample if possible
+                if n_val == 0:
+                    train_parts.append(perm)
+                    val_parts.append(np.empty((0,), dtype=np.int64))
+                else:
+                    val_parts.append(perm[:n_val])
+                    train_parts.append(perm[n_val:])
                 continue
 
             # Stratified sampling per class.
@@ -69,18 +76,43 @@ def split_within_subjects(
                 idx_c = idx[y_s == c]
                 perm_c = rng.permutation(idx_c)
                 n_val_c = max(1, int(round(idx_c.size * val_fraction)))
-                n_val_c = min(n_val_c, idx_c.size - 1)  # keep at least 1 train sample if possible
-                val_idx_s.append(perm_c[:n_val_c])
+                n_val_c = min(n_val_c, max(0, idx_c.size - 1))  # keep at least 1 train sample if possible
+                if n_val_c > 0:
+                    val_idx_s.append(perm_c[:n_val_c])
                 train_idx_s.append(perm_c[n_val_c:])
-            val_parts.append(np.concatenate(val_idx_s))
-            train_parts.append(np.concatenate(train_idx_s))
+
+            val_concat = np.concatenate(val_idx_s).astype(np.int64) if len(val_idx_s) else np.empty((0,), dtype=np.int64)
+            train_concat = (
+                np.concatenate(train_idx_s).astype(np.int64) if len(train_idx_s) else np.empty((0,), dtype=np.int64)
+            )
+            # If stratification produced no validation samples (possible on tiny subsets), fall back to random.
+            if val_concat.size == 0:
+                perm = rng.permutation(idx)
+                n_val = max(1, int(round(idx.size * val_fraction)))
+                n_val = min(n_val, max(0, idx.size - 1))
+                if n_val == 0:
+                    train_concat = perm.astype(np.int64)
+                    val_concat = np.empty((0,), dtype=np.int64)
+                else:
+                    val_concat = perm[:n_val].astype(np.int64)
+                    train_concat = perm[n_val:].astype(np.int64)
+
+            train_parts.append(train_concat)
+            val_parts.append(val_concat)
         else:
             perm = rng.permutation(idx)
             n_val = max(1, int(round(idx.size * val_fraction)))
+            n_val = min(n_val, max(0, idx.size - 1))
+            if n_val == 0:
+                train_parts.append(perm.astype(np.int64))
+                val_parts.append(np.empty((0,), dtype=np.int64))
+                continue
             val_parts.append(perm[:n_val])
             train_parts.append(perm[n_val:])
+
+    if len(train_parts) == 0:
+        raise ValueError("split_within_subjects: no subjects found to split (unexpected empty subject list)")
 
     train_idx = np.concatenate(train_parts).astype(np.int64)
     val_idx = np.concatenate(val_parts).astype(np.int64)
     return train_idx, val_idx
-

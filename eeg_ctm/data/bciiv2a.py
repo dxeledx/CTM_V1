@@ -14,6 +14,9 @@ Design doc mapping:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import warnings
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -159,6 +162,7 @@ def load_bciiv2a_moabb(
     classes: Optional[BCIIV2aClasses] = None,
     resample_sfreq: Optional[float] = None,
     return_meta: bool = False,
+    quiet: bool = True,
 ) -> Any:
     """
     Load BCI-IV-2a using MOABB.
@@ -168,21 +172,33 @@ def load_bciiv2a_moabb(
       y: [N] int64  (0..3)
       subject: [N] int64  (original subject ids)
     """
-    # Local imports to keep module import-time light.
-    from moabb.datasets import BNCI2014001
-    from moabb.paradigms import MotorImagery
-
     classes = classes or BCIIV2aClasses()
-    dataset = BNCI2014001()
-    paradigm = MotorImagery(
-        n_classes=4,
-        tmin=float(window.tmin_s),
-        tmax=float(window.tmax_s),
-        resample=resample_sfreq,
-    )
-
     # MOABB uses local caches; do NOT force downloads here.
-    X, y_str, meta = paradigm.get_data(dataset=dataset, subjects=_unique_sorted(subjects))
+    #
+    # MOABB can be quite noisy (prints + warnings). The design requirement for this project is to
+    # suppress these messages so that our own logs are clean and reproducible.
+    with contextlib.ExitStack() as stack:
+        if quiet:
+            stack.enter_context(warnings.catch_warnings())
+            warnings.filterwarnings("ignore", category=UserWarning, message=r"warnEpochs.*")
+            warnings.filterwarnings("ignore", category=UserWarning, module=r"moabb\..*")
+            warnings.filterwarnings("ignore", category=FutureWarning, module=r"moabb\..*")
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+
+        # Local imports to keep module import-time light.
+        from moabb.datasets import BNCI2014001
+        from moabb.paradigms import MotorImagery
+
+        dataset = BNCI2014001()
+        paradigm = MotorImagery(
+            n_classes=4,
+            tmin=float(window.tmin_s),
+            tmax=float(window.tmax_s),
+            resample=resample_sfreq,
+        )
+
+        X, y_str, meta = paradigm.get_data(dataset=dataset, subjects=_unique_sorted(subjects))
 
     # Map labels -> indices
     name_to_idx = classes.name_to_index

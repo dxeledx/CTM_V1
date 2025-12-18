@@ -31,7 +31,7 @@ The implementation enforces:
 
 All key hyperparameters are configurable in YAML/JSON:
 
-- Sessions: `data.sessions` (default uses both `session_T` + `session_E`).
+- Sessions: `data.sessions` (default: `null` = use all sessions returned by MOABB; typically 2 sessions, e.g. `"0train"` + `"1test"`).
 - Epoch window: `data.window.tmin_s/tmax_s` (default `0–4s` aligned to cue-onset, i.e. `2–6s` of each trial).
 - Trial-wise standardization: `data.standardize.mode` (`zscore|robust`).
 - S&R augmentation: `augment.sr.*` and injection mode `augment.injection.mode` (`none|concat|replace`).
