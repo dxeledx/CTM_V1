@@ -27,6 +27,7 @@ from eeg_ctm.models.pairs import PairBankConfig, load_or_create_pairbank
 from eeg_ctm.models.adversarial import AdvConfig
 from eeg_ctm.models.supcon import SupConConfig
 from eeg_ctm.models.tokenizer import TokenizerV1Config
+from eeg_ctm.models.wdro import WDROConfig
 from eeg_ctm.training import InjectionConfig, train_one_epoch_with_constraints
 from eeg_ctm.utils.config import deep_update, load_config_file
 from eeg_ctm.utils.seed import seed_everything
@@ -153,6 +154,11 @@ def main() -> None:
         rep_mode="certainty_weighted",
         rep_cw_alpha=5.0,
         rep_cw_detach=False,
+        acc_readout="certainty_weighted",
+        acc_cw_alpha=5.0,
+        acc_cw_detach=False,
+        wdro_cfg=WDROConfig(enabled=False),
+        epoch=1,
         supcon_cfg=SupConConfig(enabled=False),
         proj_head=None,
         adv_cfg=AdvConfig(enabled=False),

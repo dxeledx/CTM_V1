@@ -31,7 +31,9 @@ class EEGCTM(nn.Module):
         self.tokenizer = ConvPatchTokenizerV1(cfg.tokenizer)
         self.ctm = CTMCore(cfg.ctm, d_kv=int(cfg.tokenizer.d_kv), pair_bank=pair_bank)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, *, return_features: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         x: [B,C,T] (expected trial-wise standardized upstream)
         Returns:
@@ -40,5 +42,4 @@ class EEGCTM(nn.Module):
           z_ticks:     [B,T_internal,D]
         """
         tokens = self.tokenizer(x)
-        return self.ctm(tokens)
-
+        return self.ctm(tokens, return_features=return_features)

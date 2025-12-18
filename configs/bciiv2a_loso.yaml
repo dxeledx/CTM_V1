@@ -95,12 +95,24 @@ readout:
     alpha: 5.0
     detach_certainty: false   # stop-grad through certainty weights (relevant when used in training objectives)
 
+wdro:
+  enabled: false
+  level: rep                # rep|tick (tick is an optional extension)
+  norm: l2
+  rho: 0.5                  # L2 radius in feature space (tune; consider rho ~ 0.01..0.1 * mean(||rep||))
+  steps: 3                  # PGD steps
+  step_size: 0.2            # PGD step size (often ~ rho/steps)
+  mix_clean: 0.5            # loss = (1-mix_clean)*clean + mix_clean*robust
+  lambda_wdro: 1.0          # scale the WDRO term when enabled
+  normalize_rep: true       # layer-norm rep before perturbation
+  warmup_epochs: 10         # rho/step_size linearly warm up from 0 -> target
+
 opt:
   lr: 3.0e-4
   weight_decay: 1.0e-2
 
 train:
-  epochs: 100
+  epochs: 200
   batch_size: 32
   num_workers: 0
   grad_clip: 1.0

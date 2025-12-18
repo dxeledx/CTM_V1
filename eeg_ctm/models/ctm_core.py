@@ -333,6 +333,7 @@ class CTMCore(nn.Module):
 
         # Head projects output synchronisation to logits
         Dout = int(pair_bank.out_left.numel())
+        self._d_out = Dout
         if cfg.head_type == "linear":
             self.head = nn.Linear(Dout, int(cfg.num_classes))
         elif cfg.head_type == "2fc":
@@ -356,7 +357,9 @@ class CTMCore(nn.Module):
         Hn = H / float(torch.log(torch.tensor(float(C), device=logits.device)))
         return 1.0 - Hn
 
-    def forward(self, kv_tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, kv_tokens: torch.Tensor, *, return_features: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if kv_tokens.ndim != 3:
             raise ValueError(f"Expected kv_tokens [B,N,d_kv], got shape={tuple(kv_tokens.shape)}")
         B = int(kv_tokens.shape[0])
@@ -376,6 +379,9 @@ class CTMCore(nn.Module):
         logits_ticks = torch.empty((B, C, T_internal), device=device, dtype=dtype)
         certainty = torch.empty((B, T_internal), device=device, dtype=dtype)
         z_ticks = torch.empty((B, T_internal, D), device=device, dtype=dtype)
+        feat_ticks = (
+            torch.empty((B, T_internal, int(self._d_out)), device=device, dtype=dtype) if return_features else None
+        )
 
         for t in range(T_internal):
             q = self.q_proj(synch_a).unsqueeze(1)  # [B,1,d_input]
@@ -395,10 +401,13 @@ class CTMCore(nn.Module):
             alpha_a, beta_a, synch_a = self.sync.action.step(z, alpha_a, beta_a)
             alpha_o, beta_o, synch_o = self.sync.output.step(z, alpha_o, beta_o)
 
+            if feat_ticks is not None:
+                feat_ticks[:, t, :] = synch_o
+
             logits_t = self.head(synch_o)  # [B,C]
             logits_ticks[:, :, t] = logits_t
             certainty[:, t] = self.certainty_from_logits(logits_t)
             z_ticks[:, t, :] = z
-
+        if feat_ticks is not None:
+            return logits_ticks, certainty, z_ticks, feat_ticks
         return logits_ticks, certainty, z_ticks
-

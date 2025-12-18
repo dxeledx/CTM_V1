@@ -13,10 +13,11 @@ from typing import Literal, Optional
 import torch
 
 from eeg_ctm.augment.sr import ClasswiseMemoryBank, SegmentationRecombinationAugmenter
-from eeg_ctm.models.aggregation import CertaintyWeightedConfig, aggregate_rep
+from eeg_ctm.models.aggregation import CertaintyWeightedConfig, aggregate_logits, aggregate_rep
 from eeg_ctm.models.adversarial import AdvConfig, SubjectHead, grl, linear_warmup
 from eeg_ctm.models.losses import TickLossConfig, tick_classification_loss
 from eeg_ctm.models.supcon import ProjectionHead, SupConConfig, supervised_contrastive_loss
+from eeg_ctm.models.wdro import WDROConfig, wdro_rep_objective
 
 
 InjectionMode = Literal["none", "concat", "replace"]
@@ -117,6 +118,13 @@ def train_one_epoch_with_constraints(
     rep_mode: str,
     rep_cw_alpha: float,
     rep_cw_detach: bool,
+    # ---- train accuracy readout ----
+    acc_readout: str,
+    acc_cw_alpha: float,
+    acc_cw_detach: bool,
+    # ---- wasserstein DRO (feature-space) ----
+    wdro_cfg: WDROConfig,
+    epoch: int,
     # ---- supervised contrastive ----
     supcon_cfg: SupConConfig,
     proj_head: Optional[ProjectionHead],
@@ -138,6 +146,9 @@ def train_one_epoch_with_constraints(
     total_loss_adv = 0.0
     total_lambda_adv = 0.0
     cls_details_sum: dict[str, float] = {}
+    wdro_details_sum: dict[str, float] = {}
+    train_correct = 0
+    train_total = 0
     n_steps = 0
 
     if supcon_cfg.enabled:
@@ -151,6 +162,9 @@ def train_one_epoch_with_constraints(
             raise ValueError("subject_head and subject_id_map are required when adversarial is enabled")
 
     rep_cw = CertaintyWeightedConfig(alpha=float(rep_cw_alpha), detach_certainty=bool(rep_cw_detach))
+    acc_cw = CertaintyWeightedConfig(alpha=float(acc_cw_alpha), detach_certainty=bool(acc_cw_detach))
+
+    use_wdro = bool(wdro_cfg.enabled) and float(getattr(wdro_cfg, "lambda_wdro", 1.0)) != 0.0
 
     for batch in loader:
         global_step += 1
@@ -171,12 +185,21 @@ def train_one_epoch_with_constraints(
             x_aug = augmenter(x, y, uid, bank=bank, generator=rng)
             x_cat = torch.cat([x, x_aug], dim=0)
             y_cat = torch.cat([y, y], dim=0)
-            logits_cat, cert_cat, z_cat = model(x_cat)
+            if use_wdro:
+                logits_cat, cert_cat, z_cat, feat_cat = model(x_cat, return_features=True)
+                feat1 = feat_cat[:B]
+            else:
+                logits_cat, cert_cat, z_cat = model(x_cat)
+                feat1 = None
             logits1, logits2 = logits_cat[:B], logits_cat[B:]
             cert1, cert2 = cert_cat[:B], cert_cat[B:]
             z1, z2 = z_cat[:B], z_cat[B:]
         else:
-            logits1, cert1, z1 = model(x)
+            if use_wdro:
+                logits1, cert1, z1, feat1 = model(x, return_features=True)
+            else:
+                logits1, cert1, z1 = model(x)
+                feat1 = None
             logits2 = cert2 = z2 = None
             y_cat = None
 
@@ -201,6 +224,34 @@ def train_one_epoch_with_constraints(
         loss = loss_cls
         for k, v in cls_details.items():
             cls_details_sum[k] = cls_details_sum.get(k, 0.0) + float(v)
+
+        # ---- WDRO: feature-space robustification (rep-level, v1) ----
+        if use_wdro:
+            if feat1 is None:
+                raise RuntimeError("WDRO enabled but feat1 is missing (return_features not provided by model)")
+            if not hasattr(model, "ctm") or not hasattr(getattr(model, "ctm"), "head"):
+                raise RuntimeError("WDRO requires model.ctm.head")
+
+            # Aggregate the *pre-head* features over ticks (same shape semantics as z_ticks).
+            rep = aggregate_rep(feat1, cert1, mode=rep_mode, cw=rep_cw)  # [B, Dout]
+            wdro_loss, wdro_details = wdro_rep_objective(
+                rep,
+                y,
+                head=getattr(model, "ctm").head,
+                cfg=wdro_cfg,
+                epoch=int(epoch),
+            )
+            lam = float(getattr(wdro_cfg, "lambda_wdro", 1.0))
+            loss = loss + lam * wdro_loss
+            for k, v in wdro_details.items():
+                wdro_details_sum[k] = wdro_details_sum.get(k, 0.0) + float(v)
+
+        # ---- train accuracy (on original view only) ----
+        with torch.no_grad():
+            logits_pred = aggregate_logits(logits1, cert1, mode=acc_readout, cw=acc_cw)
+            pred = logits_pred.argmax(dim=-1)
+            train_correct += int((pred == y).sum().item())
+            train_total += int(y.numel())
 
         # ---- aggregate representations ----
         rep1 = None
@@ -259,8 +310,11 @@ def train_one_epoch_with_constraints(
     details = {
         "train_loss": avg_loss,
         "train_loss_cls": total_loss_cls / max(1, n_steps),
+        "train_accuracy": float(train_correct) / float(max(1, train_total)),
     }
     for k, s in cls_details_sum.items():
+        details[f"train_{k}"] = float(s) / max(1, n_steps)
+    for k, s in wdro_details_sum.items():
         details[f"train_{k}"] = float(s) / max(1, n_steps)
     if supcon_cfg.enabled:
         details["train_loss_supcon"] = total_loss_supcon / max(1, n_steps)

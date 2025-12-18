@@ -39,6 +39,7 @@ from eeg_ctm.models.losses import TickLossConfig
 from eeg_ctm.models.pairs import PairBankConfig, load_or_create_pairbank
 from eeg_ctm.models.supcon import ProjectionHead, SupConConfig
 from eeg_ctm.models.tokenizer import TokenizerV1Config
+from eeg_ctm.models.wdro import WDROConfig
 from eeg_ctm.training import InjectionConfig, TrainConfig, train_one_epoch_with_constraints
 from eeg_ctm.utils.config import deep_update, load_config_file
 from eeg_ctm.utils.logging import setup_logger
@@ -79,6 +80,7 @@ def _default_cfg() -> dict[str, Any]:
         "pairs": {**asdict(PairBankConfig()), "cache_name": "pairs.pt"},
         "loss": {"tick_loss": asdict(TickLossConfig())},
         "readout": {"mode": "certainty_weighted", "certainty_weighted": asdict(CertaintyWeightedConfig())},
+        "wdro": asdict(WDROConfig()),
         "opt": {"lr": 3e-4, "weight_decay": 1e-2},
         "train": asdict(TrainConfig()),
         "early_stop": {"enabled": True, "patience": 20, "metric": "kappa"},
@@ -403,9 +405,11 @@ def main() -> None:
         injection_cfg = InjectionConfig(**cfg["augment"]["injection"])
         supcon_cfg = SupConConfig(**cfg["optional"]["supcon"])
         adv_cfg = AdvConfig(**cfg["optional"]["adversarial"])
+        wdro_cfg = WDROConfig(**cfg.get("wdro", {}))
         logger.info(
             f"Augment: sr_enabled={sr_cfg.enabled} injection_mode={injection_cfg.mode} | "
-            f"Optional: supcon_enabled={supcon_cfg.enabled} adversarial_enabled={adv_cfg.enabled} sampler={sampler_cfg.type}"
+            f"Optional: supcon_enabled={supcon_cfg.enabled} adversarial_enabled={adv_cfg.enabled} "
+            f"wdro_enabled={wdro_cfg.enabled} sampler={sampler_cfg.type}"
         )
 
         need_aug = sr_cfg.enabled and (injection_cfg.mode != "none" or supcon_cfg.enabled)
@@ -458,7 +462,6 @@ def main() -> None:
             certainty_weighted_alpha=float(cfg["readout"]["certainty_weighted"]["alpha"]),
             certainty_weighted_detach_certainty=bool(cfg["readout"]["certainty_weighted"].get("detach_certainty", False)),
         )
-
         best_metric = -1e9
         best_epoch = 0
         best_val = None
@@ -492,6 +495,11 @@ def main() -> None:
                 rep_mode=rep_mode,
                 rep_cw_alpha=rep_cw_alpha,
                 rep_cw_detach=rep_cw_detach,
+                acc_readout=str(eval_cfg.readout),
+                acc_cw_alpha=float(eval_cfg.certainty_weighted_alpha),
+                acc_cw_detach=bool(eval_cfg.certainty_weighted_detach_certainty),
+                wdro_cfg=wdro_cfg,
+                epoch=epoch,
                 supcon_cfg=supcon_cfg,
                 proj_head=proj_head,
                 adv_cfg=adv_cfg,
