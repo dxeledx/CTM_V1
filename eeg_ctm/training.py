@@ -231,6 +231,8 @@ def train_one_epoch_with_constraints(
                 raise RuntimeError("WDRO enabled but feat1 is missing (return_features not provided by model)")
             if not hasattr(model, "ctm") or not hasattr(getattr(model, "ctm"), "head"):
                 raise RuntimeError("WDRO requires model.ctm.head")
+            if str(getattr(wdro_cfg, "level", "rep")) != "rep":
+                raise NotImplementedError("wdro.level='tick' is not implemented yet (use level='rep')")
 
             # Aggregate the *pre-head* features over ticks (same shape semantics as z_ticks).
             rep = aggregate_rep(feat1, cert1, mode=rep_mode, cw=rep_cw)  # [B, Dout]
