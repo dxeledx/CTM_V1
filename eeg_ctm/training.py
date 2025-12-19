@@ -15,18 +15,32 @@ import torch
 from eeg_ctm.augment.sr import ClasswiseMemoryBank, SegmentationRecombinationAugmenter
 from eeg_ctm.models.aggregation import CertaintyWeightedConfig, aggregate_logits, aggregate_rep
 from eeg_ctm.models.adversarial import AdvConfig, SubjectHead, grl, linear_warmup
-from eeg_ctm.models.losses import TickLossConfig, tick_classification_loss
+from eeg_ctm.models.losses import PoolCELossConfig, TickLossConfig, tick_classification_loss
 from eeg_ctm.models.supcon import ProjectionHead, SupConConfig, supervised_contrastive_loss
 from eeg_ctm.models.wdro import WDROConfig, wdro_rep_objective
 
 
-InjectionMode = Literal["none", "concat", "replace"]
+InjectionMode = Literal["none", "concat", "replace", "adain", "film", "xattn"]
 
 
 @dataclass(frozen=True)
 class InjectionConfig:
+    """
+    How to inject S&R augmentation into the training objective.
+
+    - "concat": treat augmented samples as extra independent samples (baseline)
+    - "replace": per-sample replace with augmented view w.p. replace_p
+    - "adain"/"film"/"xattn": fuse tokens from (x, x_aug) into a single forward
+      (recommended for cross-subject stability; avoids "OOD sample as new token" effect)
+    """
+
     mode: InjectionMode = "concat"
     replace_p: float = 0.5
+    # Token fusion knobs (only used when mode in {"adain","film","xattn"}).
+    film_hidden: int = 128
+    xattn_heads: int = 4
+    xattn_dropout: float = 0.0
+    xattn_layernorm: bool = True
 
 
 @dataclass(frozen=True)
@@ -109,9 +123,11 @@ def train_one_epoch_with_constraints(
     device: torch.device,
     optimizer: torch.optim.Optimizer,
     tick_loss_cfg: TickLossConfig,
+    pool_ce_cfg: PoolCELossConfig,
     augmenter: Optional[SegmentationRecombinationAugmenter],
     bank: Optional[ClasswiseMemoryBank],
     injection: InjectionConfig,
+    token_fuser: Optional[torch.nn.Module],
     rng: torch.Generator,
     grad_clip: Optional[float],
     # ---- representation aggregation ----
@@ -142,6 +158,7 @@ def train_one_epoch_with_constraints(
     model.train()
     total_loss = 0.0
     total_loss_cls = 0.0
+    total_loss_pool_ce = 0.0
     total_loss_supcon = 0.0
     total_loss_adv = 0.0
     total_lambda_adv = 0.0
@@ -175,39 +192,69 @@ def train_one_epoch_with_constraints(
 
         B = x.shape[0]
 
-        need_view2 = (
+        fusion_mode = str(injection.mode) in ("adain", "film", "xattn")
+        if fusion_mode and token_fuser is None:
+            raise ValueError("injection.mode in {adain,film,xattn} requires token_fuser")
+
+        need_aug = (
             augmenter is not None
             and bank is not None
-            and (supcon_cfg.enabled or injection.mode in ("concat", "replace"))
+            and (supcon_cfg.enabled or str(injection.mode) in ("concat", "replace", "adain", "film", "xattn"))
         )
 
-        if need_view2:
+        x_aug = None
+        if need_aug:
             x_aug = augmenter(x, y, uid, bank=bank, generator=rng)
-            x_cat = torch.cat([x, x_aug], dim=0)
-            y_cat = torch.cat([y, y], dim=0)
+
+        if fusion_mode:
+            if x_aug is None:
+                raise ValueError("Token-fusion injection requires train-time augmentation (augmenter+bank)")
+            # tokens: [B,N,d_kv] -> fuse -> CTM
+            tokens = model.tokenizer(x)
+            tokens_aug = model.tokenizer(x_aug)
+            tokens_fused = token_fuser(tokens, tokens_aug)
             if use_wdro:
-                logits_cat, cert_cat, z_cat, feat_cat = model(x_cat, return_features=True)
-                feat1 = feat_cat[:B]
+                logits1, cert1, z1, feat1 = model.ctm(tokens_fused, return_features=True)
             else:
-                logits_cat, cert_cat, z_cat = model(x_cat)
+                logits1, cert1, z1 = model.ctm(tokens_fused)
                 feat1 = None
-            logits1, logits2 = logits_cat[:B], logits_cat[B:]
-            cert1, cert2 = cert_cat[:B], cert_cat[B:]
-            z1, z2 = z_cat[:B], z_cat[B:]
-        else:
-            if use_wdro:
-                logits1, cert1, z1, feat1 = model(x, return_features=True)
+
+            # Optional second view for SupCon: swap main/cond.
+            if supcon_cfg.enabled:
+                tokens_fused2 = token_fuser(tokens_aug, tokens)
+                logits2, cert2, z2 = model.ctm(tokens_fused2)
             else:
-                logits1, cert1, z1 = model(x)
-                feat1 = None
-            logits2 = cert2 = z2 = None
+                logits2 = cert2 = z2 = None
             y_cat = None
+        else:
+            # Baseline path: run 1 or 2 views through the model.
+            if need_aug:
+                assert x_aug is not None
+                x_cat = torch.cat([x, x_aug], dim=0)
+                y_cat = torch.cat([y, y], dim=0)
+                if use_wdro:
+                    logits_cat, cert_cat, z_cat, feat_cat = model(x_cat, return_features=True)
+                    feat1 = feat_cat[:B]
+                else:
+                    logits_cat, cert_cat, z_cat = model(x_cat)
+                    feat1 = None
+                logits1, logits2 = logits_cat[:B], logits_cat[B:]
+                cert1, cert2 = cert_cat[:B], cert_cat[B:]
+                z1, z2 = z_cat[:B], z_cat[B:]
+            else:
+                if use_wdro:
+                    logits1, cert1, z1, feat1 = model(x, return_features=True)
+                else:
+                    logits1, cert1, z1 = model(x)
+                    feat1 = None
+                logits2 = cert2 = z2 = None
+                y_cat = None
 
         # ---- classification loss ----
-        if need_view2 and injection.mode == "concat":
+        if (not fusion_mode) and need_aug and injection.mode == "concat":
             assert y_cat is not None
             loss_cls, cls_details = tick_classification_loss(logits_cat, cert_cat, y_cat, cfg=tick_loss_cfg)
-        elif need_view2 and injection.mode == "replace":
+        elif (not fusion_mode) and need_aug and injection.mode == "replace":
             p = float(injection.replace_p)
             if not (0.0 <= p <= 1.0):
                 raise ValueError("replace_p must be in [0,1]")
@@ -224,6 +271,17 @@ def train_one_epoch_with_constraints(
         loss = loss_cls
         for k, v in cls_details.items():
             cls_details_sum[k] = cls_details_sum.get(k, 0.0) + float(v)
+
+        # ---- optional pooled readout CE (to train learnable tick pooling) ----
+        if bool(pool_ce_cfg.enabled):
+            if str(acc_readout) != "learned_attn":
+                raise ValueError("loss.pool_ce.enabled requires acc_readout/readout='learned_attn'")
+            if not hasattr(model, "ctm") or getattr(getattr(model, "ctm"), "tick_pool", None) is None:
+                raise RuntimeError("pool_ce requires model.ctm.tick_pool (enable ctm.tick_pool_enabled)")
+            pooled_logits = getattr(model, "ctm").tick_pool(logits1, z1)
+            loss_pool = torch.nn.functional.cross_entropy(pooled_logits, y)
+            loss = loss + float(pool_ce_cfg.lambda_ce) * loss_pool
+            total_loss_pool_ce += float(loss_pool.detach().cpu())
 
         # ---- WDRO: feature-space robustification (rep-level, v1) ----
         if use_wdro:
@@ -250,7 +308,12 @@ def train_one_epoch_with_constraints(
 
         # ---- train accuracy (on original view only) ----
         with torch.no_grad():
-            logits_pred = aggregate_logits(logits1, cert1, mode=acc_readout, cw=acc_cw)
+            if str(acc_readout) == "learned_attn":
+                if not hasattr(model, "ctm") or getattr(getattr(model, "ctm"), "tick_pool", None) is None:
+                    raise RuntimeError("acc_readout='learned_attn' requires model.ctm.tick_pool")
+                logits_pred = getattr(model, "ctm").tick_pool(logits1, z1)
+            else:
+                logits_pred = aggregate_logits(logits1, cert1, mode=acc_readout, cw=acc_cw)
             pred = logits_pred.argmax(dim=-1)
             train_correct += int((pred == y).sum().item())
             train_total += int(y.numel())
@@ -312,6 +375,7 @@ def train_one_epoch_with_constraints(
     details = {
         "train_loss": avg_loss,
         "train_loss_cls": total_loss_cls / max(1, n_steps),
+        "train_loss_pool_ce": total_loss_pool_ce / max(1, n_steps),
         "train_accuracy": float(train_correct) / float(max(1, train_total)),
     }
     for k, s in cls_details_sum.items():

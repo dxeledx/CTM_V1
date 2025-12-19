@@ -19,10 +19,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from eeg_ctm.augment.sr import ClasswiseMemoryBank, SRAugmentConfig, SegmentationRecombinationAugmenter
-from eeg_ctm.data.bciiv2a import BCIIV2aClasses, BCIIV2aWindow, EEGTrialsDataset, subset_by_subjects
+from eeg_ctm.data.bciiv2a import BCIIV2aClasses, BCIIV2aWindow, EEGTrialsDataset, FilterBankConfig, subset_by_subjects
 from eeg_ctm.models.ctm_core import CTMCoreConfig
 from eeg_ctm.models.eeg_ctm_model import EEGCTM, EEGCTMConfig
-from eeg_ctm.models.losses import TickLossConfig
+from eeg_ctm.models.losses import PoolCELossConfig, TickLossConfig
 from eeg_ctm.models.pairs import PairBankConfig, load_or_create_pairbank
 from eeg_ctm.models.adversarial import AdvConfig
 from eeg_ctm.models.supcon import SupConConfig
@@ -83,7 +83,14 @@ def main() -> None:
 
     from eeg_ctm.data.bciiv2a import load_bciiv2a_moabb
 
-    X, y, subj = load_bciiv2a_moabb(subjects, window=window, classes=BCIIV2aClasses(), resample_sfreq=None)
+    fb_cfg = FilterBankConfig(**cfg.get("data", {}).get("filterbank", {}))
+    X, y, subj = load_bciiv2a_moabb(
+        subjects,
+        window=window,
+        classes=BCIIV2aClasses(),
+        resample_sfreq=None,
+        filterbank=fb_cfg,
+    )
     std_cfg = cfg.get("data", {}).get("standardize", {"mode": "zscore", "eps": 1e-6})
     X = _standardize_trials_np(X, mode=std_cfg.get("mode", "zscore"), eps=float(std_cfg.get("eps", 1e-6))).astype(np.float32)
 
@@ -146,9 +153,11 @@ def main() -> None:
         device=device,
         optimizer=optimizer,
         tick_loss_cfg=TickLossConfig(**cfg.get("loss", {}).get("tick_loss", asdict(TickLossConfig()))),
+        pool_ce_cfg=PoolCELossConfig(enabled=False),
         augmenter=augmenter,
         bank=bank,
         injection=inj_cfg,
+        token_fuser=None,
         rng=rng,
         grad_clip=float(cfg["train"].get("grad_clip", 1.0)),
         rep_mode="certainty_weighted",

@@ -23,6 +23,19 @@ class TickLossConfig:
     hybrid_lambda: float = 0.5  # weight for mean_ce in hybrid
 
 
+@dataclass(frozen=True)
+class PoolCELossConfig:
+    """
+    Optional pooled readout CE loss.
+
+    This is mainly used when `readout.mode="learned_attn"` (learnable tick pooling),
+    so that the pooling module receives gradients.
+    """
+
+    enabled: bool = False
+    lambda_ce: float = 1.0
+
+
 def per_sample_tick_ce(logits_ticks: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     logits_ticks: [B,C,T]

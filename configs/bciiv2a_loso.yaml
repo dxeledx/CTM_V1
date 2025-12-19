@@ -9,6 +9,10 @@ data:
   # Use all sessions returned by MOABB (BCI-IV-2a normally has 2 sessions => 2×288 = 576 trials/subject).
   # Note: MOABB session names depend on version (e.g. "0train"/"1test" or "session_T"/"session_E").
   sessions: null
+  filterbank:
+    enabled: true
+    # 4-band FilterBank (Hz): mu, beta, mu+beta, theta+alpha+beta
+    bands_hz: [[8, 13], [13, 30], [8, 30], [4, 40]]
   window:
     tmin_s: 0.0        # cue-onset aligned
     tmax_s: 4.0        # 0–4s == 2–6s of each trial
@@ -32,11 +36,15 @@ augment:
     cross_fade_len: 20
     avoid_self: true
   injection:
-    mode: concat       # none|concat|replace
+    mode: adain        # none|concat|replace|adain|film|xattn
     replace_p: 0.5
+    film_hidden: 128
+    xattn_heads: 4
+    xattn_dropout: 0.0
+    xattn_layernorm: true
 
 tokenizer:
-  C: 22
+  C: 88
   T: 1000
   d_kv: 128
   temporal_kernels: [25, 63]
@@ -75,6 +83,11 @@ ctm:
   head_type: linear        # linear|2fc
   head_hidden: 128
   num_classes: 4
+  tick_pool_enabled: true
+  tick_pool_heads: 4
+  tick_pool_dropout: 0.0
+  tick_pool_layernorm: true
+  tick_pool_temperature: 1.0
 
 pairs:
   D: 256
@@ -88,9 +101,12 @@ loss:
   tick_loss:
     type: mean_ce          # mean_ce|ctm_t1t2|hybrid
     hybrid_lambda: 0.5
+  pool_ce:
+    enabled: true
+    lambda_ce: 1.0
 
 readout:
-  mode: certainty_weighted # last|most_certain|mean_logits|certainty_weighted
+  mode: learned_attn       # last|most_certain|mean_logits|certainty_weighted|learned_attn
   certainty_weighted:
     alpha: 5.0
     detach_certainty: false   # stop-grad through certainty weights (relevant when used in training objectives)

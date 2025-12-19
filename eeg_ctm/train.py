@@ -26,8 +26,16 @@ import torch
 from torch.utils.data import DataLoader
 
 from eeg_ctm.augment.sr import ClasswiseMemoryBank, SRAugmentConfig, SegmentationRecombinationAugmenter
+from eeg_ctm.augment.token_fusion import TokenFusionConfig, build_token_fuser
 from eeg_ctm.adapt.fewshot import FewShotConfig, run_few_shot
-from eeg_ctm.data.bciiv2a import BCIIV2aClasses, BCIIV2aWindow, EEGTrialsDataset, make_loso_splits, subset_by_subjects
+from eeg_ctm.data.bciiv2a import (
+    BCIIV2aClasses,
+    BCIIV2aWindow,
+    EEGTrialsDataset,
+    FilterBankConfig,
+    make_loso_splits,
+    subset_by_subjects,
+)
 from eeg_ctm.data.samplers import SamplerConfig, SubjectClassBalancedBatchSampler
 from eeg_ctm.data.splits import WithinSubjectValSplitConfig, split_within_subjects
 from eeg_ctm.eval import EvalConfig, evaluate
@@ -35,7 +43,7 @@ from eeg_ctm.models.aggregation import CertaintyWeightedConfig
 from eeg_ctm.models.adversarial import AdvConfig, SubjectHead
 from eeg_ctm.models.ctm_core import CTMCoreConfig
 from eeg_ctm.models.eeg_ctm_model import EEGCTM, EEGCTMConfig
-from eeg_ctm.models.losses import TickLossConfig
+from eeg_ctm.models.losses import PoolCELossConfig, TickLossConfig
 from eeg_ctm.models.pairs import PairBankConfig, load_or_create_pairbank
 from eeg_ctm.models.supcon import ProjectionHead, SupConConfig
 from eeg_ctm.models.tokenizer import TokenizerV1Config
@@ -59,6 +67,7 @@ def _default_cfg() -> dict[str, Any]:
             # Use all sessions by default. MOABB session naming differs across versions
             # (e.g. "0train"/"1test" or "session_T"/"session_E").
             "sessions": None,
+            "filterbank": asdict(FilterBankConfig()),
             "window": asdict(BCIIV2aWindow()),
             "resample_sfreq": None,
             "standardize": {"mode": "zscore", "eps": 1e-6},
@@ -78,7 +87,7 @@ def _default_cfg() -> dict[str, Any]:
         "tokenizer": asdict(TokenizerV1Config()),
         "ctm": asdict(CTMCoreConfig()),
         "pairs": {**asdict(PairBankConfig()), "cache_name": "pairs.pt"},
-        "loss": {"tick_loss": asdict(TickLossConfig())},
+        "loss": {"tick_loss": asdict(TickLossConfig()), "pool_ce": asdict(PoolCELossConfig())},
         "readout": {"mode": "certainty_weighted", "certainty_weighted": asdict(CertaintyWeightedConfig())},
         "wdro": asdict(WDROConfig()),
         "opt": {"lr": 3e-4, "weight_decay": 1e-2},
@@ -302,6 +311,7 @@ def main() -> None:
     # Load full dataset once (MOABB uses local caches; no forced downloads).
     classes = BCIIV2aClasses()
     window = BCIIV2aWindow(**cfg["data"]["window"])
+    fb_cfg = FilterBankConfig(**cfg["data"].get("filterbank", {}))
     from eeg_ctm.data.bciiv2a import load_bciiv2a_moabb
 
     X_all, y_all, subj_all, meta_all = load_bciiv2a_moabb(
@@ -309,6 +319,7 @@ def main() -> None:
         window=window,
         classes=classes,
         resample_sfreq=cfg["data"]["resample_sfreq"],
+        filterbank=fb_cfg,
         return_meta=True,
     )
     # Optional session filtering (default: use both sessions).
@@ -326,6 +337,17 @@ def main() -> None:
         X_all = X_all[mask]
         y_all = y_all[mask]
         subj_all = subj_all[mask]
+
+    # Auto-resolve tokenizer input shape from the loaded data (useful for filterbank).
+    C_eff = int(X_all.shape[1])
+    T_eff = int(X_all.shape[2])
+    tok_cfg = dict(cfg.get("tokenizer", {}))
+    if int(tok_cfg.get("C", C_eff)) != C_eff or int(tok_cfg.get("T", T_eff)) != T_eff:
+        print(f"[eeg_ctm] Tokenizer input shape override: C {tok_cfg.get('C')} -> {C_eff}, T {tok_cfg.get('T')} -> {T_eff}")
+    tok_cfg["C"] = C_eff
+    tok_cfg["T"] = T_eff
+    cfg["tokenizer"] = tok_cfg
+    _save_json(exp_dir / "config_resolved.json", cfg)
 
     std_cfg = cfg["data"]["standardize"]
     X_all = _standardize_trials_np(X_all, mode=std_cfg["mode"], eps=float(std_cfg.get("eps", 1e-6))).astype(np.float32)
@@ -435,6 +457,17 @@ def main() -> None:
         model_cfg = EEGCTMConfig(tokenizer=tokenizer_cfg, ctm=ctm_cfg)
         model = EEGCTM(model_cfg, pair_bank=pair_bank).to(device)
 
+        token_fuser = None
+        if str(injection_cfg.mode) in ("adain", "film", "xattn"):
+            tf_cfg = TokenFusionConfig(
+                mode=str(injection_cfg.mode),
+                film_hidden=int(injection_cfg.film_hidden),
+                xattn_heads=int(injection_cfg.xattn_heads),
+                xattn_dropout=float(injection_cfg.xattn_dropout),
+                xattn_layernorm=bool(injection_cfg.xattn_layernorm),
+            )
+            token_fuser = build_token_fuser(tf_cfg, d_model=int(tokenizer_cfg.d_kv)).to(device)
+
         # Optional heads
         rep_agg_cfg = cfg["optional"]["rep_agg"]
         rep_mode = str(rep_agg_cfg.get("mode", "certainty_weighted"))
@@ -454,6 +487,8 @@ def main() -> None:
 
         opt_cfg = cfg["opt"]
         optim_params = list(model.parameters())
+        if token_fuser is not None:
+            optim_params += list(token_fuser.parameters())
         if proj_head is not None:
             optim_params += list(proj_head.parameters())
         if subject_head is not None:
@@ -461,6 +496,7 @@ def main() -> None:
         optimizer = torch.optim.AdamW(optim_params, lr=float(opt_cfg["lr"]), weight_decay=float(opt_cfg["weight_decay"]))
 
         tick_loss_cfg = TickLossConfig(**cfg["loss"]["tick_loss"])
+        pool_ce_cfg = PoolCELossConfig(**cfg.get("loss", {}).get("pool_ce", {}))
         eval_cfg = EvalConfig(
             readout=str(cfg["readout"]["mode"]),
             certainty_weighted_alpha=float(cfg["readout"]["certainty_weighted"]["alpha"]),
@@ -491,9 +527,11 @@ def main() -> None:
                 device=device,
                 optimizer=optimizer,
                 tick_loss_cfg=tick_loss_cfg,
+                pool_ce_cfg=pool_ce_cfg,
                 augmenter=augmenter,
                 bank=bank,
                 injection=injection_cfg,
+                token_fuser=token_fuser,
                 rng=rng,
                 grad_clip=float(train_cfg.grad_clip) if train_cfg.grad_clip is not None else None,
                 rep_mode=rep_mode,

@@ -34,16 +34,21 @@ def predict(
     for batch in loader:
         x = batch["x"].to(device)
         y = batch["y"].to(device)
-        logits_ticks, certainty, _ = model(x)
-        logits = aggregate_logits(
-            logits_ticks,
-            certainty,
-            mode=eval_cfg.readout,  # type: ignore[arg-type]
-            cw=CertaintyWeightedConfig(
-                alpha=float(eval_cfg.certainty_weighted_alpha),
-                detach_certainty=bool(eval_cfg.certainty_weighted_detach_certainty),
-            ),
-        )
+        logits_ticks, certainty, z_ticks = model(x)
+        if str(eval_cfg.readout) == "learned_attn":
+            if not hasattr(model, "ctm") or getattr(getattr(model, "ctm"), "tick_pool", None) is None:
+                raise RuntimeError("readout='learned_attn' requires model.ctm.tick_pool (enable ctm.tick_pool_enabled)")
+            logits = getattr(model, "ctm").tick_pool(logits_ticks, z_ticks)
+        else:
+            logits = aggregate_logits(
+                logits_ticks,
+                certainty,
+                mode=eval_cfg.readout,  # type: ignore[arg-type]
+                cw=CertaintyWeightedConfig(
+                    alpha=float(eval_cfg.certainty_weighted_alpha),
+                    detach_certainty=bool(eval_cfg.certainty_weighted_detach_certainty),
+                ),
+            )
         pred = logits.argmax(dim=-1)
         y_true.extend(y.detach().cpu().tolist())
         y_pred.extend(pred.detach().cpu().tolist())

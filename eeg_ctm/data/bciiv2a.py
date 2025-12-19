@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import logging
 import warnings
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 import numpy as np
 import torch
@@ -51,6 +52,28 @@ class BCIIV2aClasses:
     @property
     def name_to_index(self) -> dict[str, int]:
         return {name: i for i, name in enumerate(self.names)}
+
+
+FilterBankFlatten = Literal["concat_channels"]
+
+
+@dataclass(frozen=True)
+class FilterBankConfig:
+    """
+    MOABB FilterBank settings.
+
+    When enabled, MOABB will return X with an extra "band" dimension: [N,C,T,B].
+    We then flatten it to [N, C*B, T] (concat along channel) to keep the rest of
+    the pipeline unchanged.
+
+    Design doc mapping:
+      - design.md §3 "范式B：Filter-bank / multi-view → tokens"
+    """
+
+    enabled: bool = False
+    # Recommended MI filter bank bands (Hz). Keep small (B<=4) to avoid compute blow-up.
+    bands_hz: tuple[tuple[float, float], ...] = ((8.0, 13.0), (13.0, 30.0), (8.0, 30.0), (4.0, 40.0))
+    flatten: FilterBankFlatten = "concat_channels"
 
 
 class EEGTrialsDataset(Dataset):
@@ -161,6 +184,7 @@ def load_bciiv2a_moabb(
     window: BCIIV2aWindow,
     classes: Optional[BCIIV2aClasses] = None,
     resample_sfreq: Optional[float] = None,
+    filterbank: FilterBankConfig = FilterBankConfig(),
     return_meta: bool = False,
     quiet: bool = True,
 ) -> Any:
@@ -185,18 +209,34 @@ def load_bciiv2a_moabb(
             warnings.filterwarnings("ignore", category=FutureWarning, module=r"moabb\..*")
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            # MOABB uses logging for some messages (not captured by stderr redirection if handlers
+            # were created before redirect). Silence it in this scope.
+            moabb_logger = logging.getLogger("moabb")
+            old_level = moabb_logger.level
+            moabb_logger.setLevel(logging.ERROR)
+            stack.callback(moabb_logger.setLevel, old_level)
 
         # Local imports to keep module import-time light.
         from moabb.datasets import BNCI2014001
-        from moabb.paradigms import MotorImagery
+        from moabb.paradigms import FilterBankMotorImagery, MotorImagery
 
         dataset = BNCI2014001()
-        paradigm = MotorImagery(
-            n_classes=4,
-            tmin=float(window.tmin_s),
-            tmax=float(window.tmax_s),
-            resample=resample_sfreq,
-        )
+        if bool(filterbank.enabled):
+            fb_filters = [[float(a), float(b)] for a, b in filterbank.bands_hz]
+            paradigm = FilterBankMotorImagery(
+                n_classes=4,
+                filters=fb_filters,
+                tmin=float(window.tmin_s),
+                tmax=float(window.tmax_s),
+                resample=resample_sfreq,
+            )
+        else:
+            paradigm = MotorImagery(
+                n_classes=4,
+                tmin=float(window.tmin_s),
+                tmax=float(window.tmax_s),
+                resample=resample_sfreq,
+            )
 
         X, y_str, meta = paradigm.get_data(dataset=dataset, subjects=_unique_sorted(subjects))
 
@@ -205,7 +245,15 @@ def load_bciiv2a_moabb(
     y = np.asarray([name_to_idx[str(lbl)] for lbl in y_str], dtype=np.int64)
     subj = meta["subject"].to_numpy(dtype=np.int64)
 
-    X = np.asarray(X, dtype=np.float32)  # [N,C,T]
+    X = np.asarray(X, dtype=np.float32)
+    # For FilterBank paradigms, MOABB returns X as [N,C,T,B]. Flatten to [N,C*B,T].
+    if X.ndim == 4:
+        # [N,C,T,B] -> [N,C,B,T] -> [N,C*B,T]
+        X = np.transpose(X, (0, 1, 3, 2))
+        N, C, B, T = X.shape
+        X = X.reshape(N, C * B, T)
+    if X.ndim != 3:
+        raise ValueError(f"Expected X as [N,C,T] after preprocessing, got shape={X.shape}")
     if window.drop_last_sample and X.shape[-1] > 0:
         # 4 seconds @ 250Hz yields 1001 samples in MNE (inclusive endpoint); we want 1000.
         X = X[..., : X.shape[-1] - 1]

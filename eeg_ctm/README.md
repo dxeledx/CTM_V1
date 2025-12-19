@@ -52,20 +52,24 @@ Few-shot results are stored under `fold_<test_subject>/metrics.json -> few_shot`
 All key hyperparameters are configurable in YAML/JSON:
 
 - Sessions: `data.sessions` (default: `null` = use all sessions returned by MOABB; typically 2 sessions, e.g. `"0train"` + `"1test"`).
+- FilterBank (multi-band): `data.filterbank.enabled` + `data.filterbank.bands_hz` (MOABB FilterBank; output is flattened to `C = C_raw * n_bands`).
 - Epoch window: `data.window.tmin_s/tmax_s` (default `0–4s` aligned to cue-onset, i.e. `2–6s` of each trial).
 - Trial-wise standardization: `data.standardize.mode` (`zscore|robust`).
-- S&R augmentation: `augment.sr.*` and injection mode `augment.injection.mode` (`none|concat|replace`).
+- S&R augmentation: `augment.sr.*` and injection mode `augment.injection.mode`:
+  - baseline: `none|concat|replace`
+  - token-level fusion/modulation (recommended cross-subject): `adain|film|xattn`
 - Tokenizer v1: `tokenizer.*` (targets `N≈20` tokens via `token_pool_kernel/stride`).
 - CTM core: `ctm.*` (ticks, pairs, fusion, NLM, head).
 - Tick loss: `loss.tick_loss.*` and inference readout: `readout.*`.
 - Readout stop-grad: `readout.certainty_weighted.detach_certainty` (helps prevent “certainty shortcut” when certainty weights appear in training objectives).
+- Learnable tick pooling: set `readout.mode=learned_attn` and enable `ctm.tick_pool_enabled=true` (train with `loss.pool_ce.enabled=true`).
 - Wasserstein-DRO (feature-space PGD): `wdro.*` (disabled by default; robustifies pre-head representations under L2-ball perturbations; set `wdro.mix_robust=1.0` to avoid adding extra clean CE on top of the main tick-loss).
 - Validation strategy:
   - `split.val_strategy=within_subject` (recommended): per-training-subject holdout by `split.within_subject_val_fraction` for early stopping.
   - `split.val_strategy=next|fixed|none` are also supported.
 - Optional constraints:
-  - Supervised contrastive: `optional.supcon.*` (requires `optional.sampler.type=subject_class_balanced` in practice).
-  - Subject adversarial (GRL): `optional.adversarial.*` (λ warmup).
+  - Supervised contrastive (cross-subject invariance): set `optional.supcon.enabled=true` (often pair with `optional.sampler.type=subject_class_balanced`).
+  - Subject adversarial / domain confusion (GRL): set `optional.adversarial.enabled=true` (λ warmup).
   - Representation aggregation stop-grad: `optional.rep_agg.certainty_weighted.detach_certainty`.
 - Few-shot test-time adaptation: `few_shot.*` (disabled by default).
 
@@ -74,6 +78,13 @@ Training stability diagnostics:
 - `tick_gap_ce`: average per-batch tick-gap of CE (2nd best - best)
 - `tick_gap_certainty`: average per-batch tick-gap of certainty (best - 2nd best)
 - `wdro_*` (when enabled): robust loss gap, delta norm, effective rho/step size under warmup
+- `train_loss_pool_ce` (when enabled): pooled readout CE (trains learnable tick pooling)
+
+## Cross-subject objectives (implemented)
+
+- Subject-adversarial (GRL): `optional.adversarial.enabled=true` (+ `lambda_max`, `warmup`, `head_hidden`).
+- Supervised contrastive: `optional.supcon.enabled=true` (+ `tau`, `lambda_con`); for stable batches use `optional.sampler.type=subject_class_balanced`.
+- Feature-space Wasserstein-DRO: `wdro.enabled=true` (+ `rho`, `steps`, `step_size`, `warmup_epochs`).
 
 ## Self-check / smoke test
 

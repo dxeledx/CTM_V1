@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from eeg_ctm.utils.ctm_repo import ensure_ctm_on_path
+from eeg_ctm.models.tick_pool import LearnedTickAttentionPool
 
 
 # Import CTM building blocks.
@@ -75,6 +76,13 @@ class CTMCoreConfig:
     head_type: HeadType = "linear"
     head_hidden: int = 128
     num_classes: int = 4
+
+    # Learnable tick pooling (replaces heuristic certainty-weighted readout when enabled).
+    tick_pool_enabled: bool = False
+    tick_pool_heads: int = 4
+    tick_pool_dropout: float = 0.0
+    tick_pool_layernorm: bool = True
+    tick_pool_temperature: float = 1.0
 
 
 class CTMInit(nn.Module):
@@ -345,6 +353,19 @@ class CTMCore(nn.Module):
             )
         else:
             raise ValueError(cfg.head_type)
+
+        # Learnable attention pooling over ticks (optional).
+        self.tick_pool = (
+            LearnedTickAttentionPool(
+                d_rep=int(cfg.D),
+                n_heads=int(cfg.tick_pool_heads),
+                dropout=float(cfg.tick_pool_dropout),
+                layernorm=bool(cfg.tick_pool_layernorm),
+                temperature=float(cfg.tick_pool_temperature),
+            )
+            if bool(cfg.tick_pool_enabled)
+            else None
+        )
 
     @staticmethod
     def certainty_from_logits(logits: torch.Tensor) -> torch.Tensor:
