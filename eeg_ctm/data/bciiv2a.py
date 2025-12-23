@@ -279,6 +279,30 @@ def subset_by_subjects(
     return x[mask], y[mask], subject[mask], uid
 
 
+def subset_by_subjects_and_sessions(
+    x: np.ndarray,
+    y: np.ndarray,
+    subject: np.ndarray,
+    meta,  # pandas DataFrame from MOABB
+    *,
+    subjects_keep: Iterable[int],
+    sessions_keep: Iterable[str],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Filter trials by subject ids AND session names.
+
+    Returns (x_sub, y_sub, subject_sub, uid_sub) where uid_sub are indices into the original arrays.
+    """
+    subjects_keep_set = {int(s) for s in subjects_keep}
+    sessions_keep_set = {str(s) for s in sessions_keep}
+    sess = meta["session"].astype(str).to_numpy()
+    mask = np.isin(subject, np.fromiter(subjects_keep_set, dtype=np.int64)) & np.isin(
+        sess, np.fromiter(sessions_keep_set, dtype=object)
+    )
+    uid = np.flatnonzero(mask).astype(np.int64)
+    return x[mask], y[mask], subject[mask], uid
+
+
 def build_fold_datasets(
     *,
     all_subjects: Iterable[int],

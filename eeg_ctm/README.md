@@ -1,13 +1,19 @@
-# EEG-CTM (BCI-IV-2a LOSO)
+# EEG-CTM (BCI-IV-2a)
 
 This folder adds an EEG motor-imagery cross-subject classification training framework on top of the original CTM source tree (`continuous-thought-machines-main/`).
 
-## Run (LOSO)
+## Run
 
 From repo root:
 
 ```bash
 python3 -m eeg_ctm.train --config configs/bciiv2a_loso.yaml
+```
+
+Within-subject cross-session (train on one session, test on the other):
+
+```bash
+python3 -m eeg_ctm.train --config configs/bciiv2a_within_subject_cross_session.yaml
 ```
 
 Outputs:
@@ -19,11 +25,12 @@ Outputs:
 Note: to avoid overwriting, if `runs/<exp_name>/` already exists and is non-empty, the runner automatically
 creates `runs/<exp_name>__run01/`, `__run02/`, ... (set `overwrite: true` in config to overwrite in-place).
 
-## Leakage prevention (LOSO)
+## Leakage prevention
 
 The implementation enforces:
 
 - Test subject data is never used for training or model selection.
+- For within-subject cross-session: test **session** data is never used for training or model selection.
 - Validation subject (if enabled) is excluded from the S&R donor pool.
 - Standardization is **trial-wise** (each trial uses its own statistics), so there is no train/test statistic sharing.
 
@@ -51,6 +58,9 @@ Few-shot results are stored under `fold_<test_subject>/metrics.json -> few_shot`
 
 All key hyperparameters are configurable in YAML/JSON:
 
+- Training protocol:
+  - LOSO (cross-subject): `protocol.type=loso`
+  - Within-subject cross-session: `protocol.type=within_subject_cross_session` with `protocol.train_session`/`protocol.test_session`
 - Sessions: `data.sessions` (default: `null` = use all sessions returned by MOABB; typically 2 sessions, e.g. `"0train"` + `"1test"`).
 - FilterBank (multi-band): `data.filterbank.enabled` + `data.filterbank.bands_hz` (MOABB FilterBank; output is flattened to `C = C_raw * n_bands`).
 - Epoch window: `data.window.tmin_s/tmax_s` (default `0–4s` aligned to cue-onset, i.e. `2–6s` of each trial).

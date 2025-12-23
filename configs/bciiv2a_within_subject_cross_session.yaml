@@ -1,32 +1,34 @@
-exp_name: bciiv2a_loso_ctm_v1
+exp_name: bciiv2a_within_subject_cross_session_ctm_v1
 seed: 42
 device: auto          # auto|cpu|cuda
 deterministic: true
 runs_dir: runs
 
 protocol:
-  type: loso
+  type: within_subject_cross_session
+  # Train on one session of the SAME subject, test on the other session.
+  # MOABB session naming depends on version; "0train"/"1test" are common for BNCI2014_001.
+  train_session: "0train"
+  test_session: "1test"
 
 data:
   subjects: [1,2,3,4,5,6,7,8,9]
-  # Use all sessions returned by MOABB (BCI-IV-2a normally has 2 sessions => 2×288 = 576 trials/subject).
-  # Note: MOABB session names depend on version (e.g. "0train"/"1test" or "session_T"/"session_E").
   sessions: null
   filterbank:
     enabled: true
-    # 4-band FilterBank (Hz): mu, beta, mu+beta, theta+alpha+beta
     bands_hz: [[8, 13], [13, 30], [8, 30], [4, 40]]
   window:
-    tmin_s: 0.0        # cue-onset aligned
-    tmax_s: 4.0        # 0–4s == 2–6s of each trial
+    tmin_s: 0.0
+    tmax_s: 4.0
     drop_last_sample: true
   resample_sfreq: null
   standardize:
-    mode: zscore       # zscore|robust
+    mode: zscore
     eps: 1.0e-6
 
 split:
-  val_strategy: within_subject   # within_subject|next|fixed|none
+  # Validation is a stratified holdout from the TRAIN session of the same subject.
+  val_strategy: within_subject
   fixed_val_subject: null
   within_subject_val_fraction: 0.3
   within_subject_stratify_by_class: true
@@ -47,6 +49,8 @@ augment:
     xattn_layernorm: true
 
 tokenizer:
+  # Note: C/T are auto-overridden by `eeg_ctm.train` based on loaded data.
+  # With 4-band filterbank: C = 22 * 4 = 88.
   C: 88
   T: 1000
   d_kv: 128
@@ -62,7 +66,7 @@ tokenizer:
   token_norm: LN
   act: ELU
   dropout_p: 0.25
-  pos_emb: learnable   # learnable|sinusoidal|none
+  pos_emb: learnable
 
 ctm:
   D: 256
@@ -71,7 +75,7 @@ ctm:
   d_input: 128
   n_heads: 8
   attn_dropout: 0.0
-  kv_projector: identity   # identity|linear|mlp
+  kv_projector: identity
   kv_mlp_hidden: 256
   synapse_hidden: 512
   synapse_dropout: 0.1
@@ -79,11 +83,11 @@ ctm:
   memory_hidden_dims: 64
   do_layernorm_nlm: false
   nlm_dropout: 0.0
-  init_mode: zeros         # zeros|learnable|learnable_noise
+  init_mode: zeros
   ln_on_preact_hist: false
-  fusion: gated            # concat|film|gated
+  fusion: gated
   no_decay_init: true
-  head_type: linear        # linear|2fc
+  head_type: linear
   head_hidden: 128
   num_classes: 4
   tick_pool_enabled: true
@@ -102,29 +106,29 @@ pairs:
 
 loss:
   tick_loss:
-    type: mean_ce          # mean_ce|ctm_t1t2|hybrid
+    type: mean_ce
     hybrid_lambda: 0.5
   pool_ce:
     enabled: true
     lambda_ce: 1.0
 
 readout:
-  mode: learned_attn       # last|most_certain|mean_logits|certainty_weighted|learned_attn
+  mode: learned_attn
   certainty_weighted:
     alpha: 5.0
-    detach_certainty: false   # stop-grad through certainty weights (relevant when used in training objectives)
+    detach_certainty: false
 
 wdro:
-  enabled: true
-  level: rep                # rep|tick (tick is an optional extension)
+  enabled: false
+  level: rep
   norm: l2
-  rho: 0.5                  # L2 radius in feature space (tune; consider rho ~ 0.01..0.1 * mean(||rep||))
-  steps: 3                  # PGD steps
-  step_size: 0.2            # PGD step size (often ~ rho/steps)
-  mix_robust: 1.0           # loss = (1-mix_robust)*clean + mix_robust*robust (recommended: 1.0 to avoid extra clean CE)
-  lambda_wdro: 1.0          # scale the WDRO term when enabled
-  normalize_rep: true       # layer-norm rep before perturbation
-  warmup_epochs: 10         # rho/step_size linearly warm up from 0 -> target
+  rho: 0.5
+  steps: 3
+  step_size: 0.2
+  mix_robust: 1.0
+  lambda_wdro: 1.0
+  normalize_rep: true
+  warmup_epochs: 10
 
 opt:
   lr: 3.0e-4
@@ -139,14 +143,14 @@ train:
 
 early_stop:
   enabled: true
-  patience: 50
-  metric: kappa           # accuracy|kappa|macro_f1
+  patience: 20
+  metric: kappa
 
 optional:
   sampler:
-    type: none                 # none|subject_class_balanced
-    subjects_per_batch: 4      # S
-    samples_per_class: 2       # m
+    type: none
+    subjects_per_batch: 4
+    samples_per_class: 2
   supcon:
     enabled: false
     tau: 0.07
@@ -160,25 +164,23 @@ optional:
     warmup: 0.3
     head_hidden: 128
   rep_agg:
-    mode: certainty_weighted   # last|mean|certainty_weighted
+    mode: certainty_weighted
     certainty_weighted:
       alpha: 5.0
       detach_certainty: false
 
 few_shot:
   enabled: false
-  # Recommended protocol for BCI-IV-2a: adapt on session "0train" and report on "1test".
-  # This avoids using the evaluation session for adaptation.
-  protocol: cross_session        # within_subject|cross_session
+  protocol: cross_session
   support_session: "0train"
   query_session: "1test"
   k_shots: [1, 5, 10, 20]
-  n_resamples: 5                 # repeated balanced re-sampling for mean±std
+  n_resamples: 5
   seed: 42
-  # Head-only adaptation (default): freeze tokenizer + CTM core, train only the head parameters.
   trainable_prefixes: ["ctm.head"]
   lr: 1.0e-2
   weight_decay: 0.0
   steps: 200
   batch_size: 16
   grad_clip: null
+

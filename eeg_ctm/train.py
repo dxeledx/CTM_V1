@@ -1,7 +1,8 @@
 """
-CLI entry: `python -m eeg_ctm.train --config configs/bciiv2a_loso.yaml`
+CLI entry: `python -m eeg_ctm.train --config <config.yaml>`
 
-Implements LOSO training/evaluation on BCI Competition IV-2a using:
+Implements training/evaluation on BCI Competition IV-2a using:
+  - LOSO (cross-subject) or within-subject cross-session protocols
   - Trial-wise standardization (no leakage)
   - Train-only S&R augmentation (no leakage donor pool)
   - Tokenizer v1 + CTM core with multi-tick outputs
@@ -35,6 +36,7 @@ from eeg_ctm.data.bciiv2a import (
     FilterBankConfig,
     make_loso_splits,
     subset_by_subjects,
+    subset_by_subjects_and_sessions,
 )
 from eeg_ctm.data.samplers import SamplerConfig, SubjectClassBalancedBatchSampler
 from eeg_ctm.data.splits import WithinSubjectValSplitConfig, split_within_subjects
@@ -62,6 +64,13 @@ def _default_cfg() -> dict[str, Any]:
         "device": "auto",  # auto|cpu|cuda
         "deterministic": True,
         "runs_dir": "runs",
+        "protocol": {
+            # "loso" or "within_subject_cross_session"
+            "type": "loso",
+            # Used when type="within_subject_cross_session"
+            "train_session": "0train",
+            "test_session": "1test",
+        },
         "data": {
             "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9],
             # Use all sessions by default. MOABB session naming differs across versions
@@ -306,7 +315,18 @@ def main() -> None:
 
     subjects = cfg["data"]["subjects"]
     val_strategy = str(cfg["split"]["val_strategy"])
-    folds = make_loso_splits(subjects, val_strategy=val_strategy, fixed_val_subject=cfg["split"]["fixed_val_subject"])
+    protocol_cfg = cfg.get("protocol", {"type": "loso"})
+    protocol_type = str(protocol_cfg.get("type", "loso"))
+    if protocol_type == "loso":
+        folds = make_loso_splits(subjects, val_strategy=val_strategy, fixed_val_subject=cfg["split"]["fixed_val_subject"])
+    elif protocol_type == "within_subject_cross_session":
+        if val_strategy not in ("within_subject", "none"):
+            raise ValueError("For protocol.type='within_subject_cross_session', split.val_strategy must be within_subject|none")
+        folds = []
+        for i, s in enumerate(sorted(int(x) for x in subjects)):
+            folds.append({"fold_idx": i, "train_subjects": [s], "val_subject": None, "test_subject": s})
+    else:
+        raise ValueError(f"Unknown protocol.type={protocol_type!r}")
 
     # Load full dataset once (MOABB uses local caches; no forced downloads).
     classes = BCIIV2aClasses()
@@ -338,6 +358,18 @@ def main() -> None:
         y_all = y_all[mask]
         subj_all = subj_all[mask]
 
+    # Resolve sessions for within-subject cross-session protocol (after any global session filtering).
+    train_session_resolved = None
+    test_session_resolved = None
+    if protocol_type == "within_subject_cross_session":
+        available_sessions = sorted({str(s) for s in meta_all["session"].unique().tolist()})
+        train_session_req = str(protocol_cfg.get("train_session", "0train"))
+        test_session_req = str(protocol_cfg.get("test_session", "1test"))
+        train_session_resolved = _resolve_sessions_to_keep(available=available_sessions, requested=[train_session_req])[0]
+        test_session_resolved = _resolve_sessions_to_keep(available=available_sessions, requested=[test_session_req])[0]
+        if train_session_resolved == test_session_resolved:
+            raise ValueError("protocol.train_session and protocol.test_session must be different")
+
     # Auto-resolve tokenizer input shape from the loaded data (useful for filterbank).
     C_eff = int(X_all.shape[1])
     T_eff = int(X_all.shape[2])
@@ -359,11 +391,30 @@ def main() -> None:
         fold_dir = exp_dir / fold_name
         logger = setup_logger(fold_dir, name=f"eeg_ctm.{fold_name}")
         logger.info(f"Device: {device}")
-        logger.info(
-            f"Fold: test={fold['test_subject']} val={fold['val_subject']} train={fold['train_subjects']} (val_strategy={val_strategy})"
-        )
+        if protocol_type == "loso":
+            logger.info(
+                f"Fold: test={fold['test_subject']} val={fold['val_subject']} "
+                f"train={fold['train_subjects']} (val_strategy={val_strategy})"
+            )
+        else:
+            assert train_session_resolved is not None and test_session_resolved is not None
+            logger.info(
+                f"Fold: subject={fold['test_subject']} train_session={train_session_resolved} "
+                f"test_session={test_session_resolved} (val_strategy={val_strategy})"
+            )
 
-        x_tr_all, y_tr_all, s_tr_all, uid_tr_all = subset_by_subjects(X_all, y_all, subj_all, fold["train_subjects"])
+        if protocol_type == "within_subject_cross_session":
+            assert train_session_resolved is not None
+            x_tr_all, y_tr_all, s_tr_all, uid_tr_all = subset_by_subjects_and_sessions(
+                X_all,
+                y_all,
+                subj_all,
+                meta_all,
+                subjects_keep=fold["train_subjects"],
+                sessions_keep=[train_session_resolved],
+            )
+        else:
+            x_tr_all, y_tr_all, s_tr_all, uid_tr_all = subset_by_subjects(X_all, y_all, subj_all, fold["train_subjects"])
         if val_strategy == "within_subject":
             vs_cfg = WithinSubjectValSplitConfig(
                 val_fraction=float(cfg["split"].get("within_subject_val_fraction", 0.3)),
@@ -381,7 +432,18 @@ def main() -> None:
                 x_va, y_va, s_va, uid_va = subset_by_subjects(X_all, y_all, subj_all, [fold["val_subject"]])
                 val_ds = EEGTrialsDataset(x_va, y_va, s_va, uid=uid_va)
 
-        x_te, y_te, s_te, uid_te = subset_by_subjects(X_all, y_all, subj_all, [fold["test_subject"]])
+        if protocol_type == "within_subject_cross_session":
+            assert test_session_resolved is not None
+            x_te, y_te, s_te, uid_te = subset_by_subjects_and_sessions(
+                X_all,
+                y_all,
+                subj_all,
+                meta_all,
+                subjects_keep=[fold["test_subject"]],
+                sessions_keep=[test_session_resolved],
+            )
+        else:
+            x_te, y_te, s_te, uid_te = subset_by_subjects(X_all, y_all, subj_all, [fold["test_subject"]])
         test_ds = EEGTrialsDataset(x_te, y_te, s_te, uid=uid_te)
 
         # Sanity logging: exact sample counts and subject×session×run breakdown.
@@ -625,6 +687,9 @@ def main() -> None:
             "val_subject": fold["val_subject"],
             "test_subject": fold["test_subject"],
             "val_strategy": val_strategy,
+            "protocol": protocol_type,
+            "train_session": train_session_resolved,
+            "test_session": test_session_resolved,
             "data_sessions": sessions_keep if sessions_keep is not None else "all",
             "split_counts": split_info,
             "best_epoch": best_epoch,
